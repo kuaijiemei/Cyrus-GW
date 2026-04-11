@@ -10,7 +10,7 @@
 
 ### 0.1 P0（必须完成）
 
-- [ ] `/chat` 非流式主链路打通（Client -> Gateway -> Agent -> LLM -> Client）
+- [✔] `/chat` 非流式主链路打通（Client -> Gateway -> Agent -> LLM -> Client）
 - [ ] `/chat` 流式 SSE 主链路打通
 - [ ] Gateway 限流（超限返回 `429`）
 - [ ] Agent 决策（`direct_answer` / `tool_call`）
