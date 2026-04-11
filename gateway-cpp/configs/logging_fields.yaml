@@ -1,0 +1,22 @@
+# 统一日志字段初稿（Gateway / Agent 对齐用）
+# HTTP status 使用 status_code；业务错误使用 error_code + error_layer。
+required:
+  - request_id
+  - latency_ms
+  - status_code
+  - tool_used
+
+recommended:
+  - path
+  - queue_wait_ms
+  - llm_call_latency_ms
+  - stream
+  - retry_count
+  - client_ip
+  - error_code
+  - error_layer
+
+error_layer_values:
+  - gateway
+  - agent
+  - llm

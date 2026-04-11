@@ -1,0 +1,18 @@
+# Cyrus-GW Gateway — baseline config (MVP). Values are illustrative; tune per env.
+listen_host: "0.0.0.0"
+listen_port: 8080
+
+agent_base_url: "http://127.0.0.1:8001"
+agent_timeout_ms: 8000
+agent_retry_max: 1
+
+rate_limit:
+  capacity: 500
+  refill_per_sec: 200
+
+queue:
+  max_size: 2000
+
+sse:
+  first_chunk_timeout_ms: 5000
+  total_timeout_ms: 120000

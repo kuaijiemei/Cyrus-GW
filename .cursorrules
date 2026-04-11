@@ -1,0 +1,61 @@
+# Cyrus-GW Cursor Rules
+
+本文件是快速约束入口，用于补充编辑器内 AI 协作一致性；详细规范以 `AGENTS.md`、`PRD.md`、`TECH_DESIGN.md` 为准。
+
+## 优先级与边界
+
+1. 文档优先级：`PRD.md` > `TECH_DESIGN.md` > `RESEARCH.md` > `AGENTS.md` > `.cursorrules`
+2. 项目边界必须保持 MVP 收敛，不得主动引入：
+   - 分布式
+   - 多 Agent 协作
+   - gRPC
+   - 多租户
+   - cost 计费
+   - 复杂策略引擎
+
+## 架构纪律
+
+- 维持双服务架构：
+  - C++ Gateway：高并发接入、调度、限流、SSE 透传、转发
+  - Python Agent：任务理解、LLM 调用、tool 决策
+- 不将复杂 AI 决策逻辑塞入 Gateway。
+- 服务间通信默认使用 HTTP + JSON。
+
+## 代码与实现约束
+
+- C++ 使用 C++20。
+- Python API Schema 必须类型化（Pydantic）。
+- 请求主路径避免阻塞 I/O。
+- 错误处理要有统一返回结构，日志可追踪。
+- 敏感信息（API key）只使用环境变量，不写入仓库。
+
+## 可观测性最低要求
+
+日志至少包含以下字段：
+
+- `request_id`
+- `latency_ms`
+- `status_code`
+- `tool_used`
+
+建议附加：
+
+- `retry_count`
+- `queue_wait_ms`
+
+## 变更同步要求
+
+- 若涉及架构级变更，必须同步更新 `PRD.md` 与 `TECH_DESIGN.md`。
+- 新增基础设施前先确认是否超出 MVP 范围。
+
+## 交付导向
+
+- 任何任务默认要求：
+  - 至少 1 条正常路径验证
+  - 至少 1 条异常路径验证
+  - 每完成一个模块后，将开发问题复盘写入 `TIL.md`
+- 重点保障：
+  - `/chat` 非流式与流式可用
+  - 限流 `429`
+  - LLM 超时最多 1 次重试
+  - tool 调用路径可复现
