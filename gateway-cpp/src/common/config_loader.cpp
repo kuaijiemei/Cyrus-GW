@@ -145,6 +145,12 @@ std::optional<GatewayConfigSnapshot> load_gateway_config(const std::filesystem::
     if (auto it = kv.find("sse.total_timeout_ms"); it != kv.end()) {
         c.sse_total_timeout_ms = parse_i32(it->second, 120000);
     }
+    if (auto it = kv.find("queue.max_size"); it != kv.end()) {
+        c.queue_max_size = parse_i32(it->second, 2000);
+    }
+    if (auto it = kv.find("queue.timeout_ms"); it != kv.end()) {
+        c.queue_timeout_ms = parse_i32(it->second, 0);
+    }
     return c;
 }
 

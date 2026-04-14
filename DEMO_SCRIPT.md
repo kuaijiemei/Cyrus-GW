@@ -22,8 +22,8 @@
 │  │ Server  │  │ (TokenBucket)│  │ (Coroutine │  │ Agent     │  │
 │  │         │  │              │  │  / Thread)  │  │ Client    │  │
 │  └─────────┘  └──────────────┘  └────────────┘  └─────┬─────┘  │
-│   非阻塞I/O     429 超限返回      io_uring/epoll        │        │
-│   C++20协程     可配置参数        双模对比               │        │
+│   非阻塞I/O     429 超限返回      TaskQueue+WorkerPool   │        │
+│   C++20协程     可配置参数        双模对比(含queue_wait) │        │
 └──────────────────────────────────────────────────────────┼────────┘
                                                            │ HTTP+JSON
                                                            ▼
@@ -295,6 +295,18 @@ wait
 > A：超时是因为 Agent 单 worker 处理不过来。但在相同约束下，
 > io_uring 完成了 196 个请求 vs epoll 的 91 个——说明 io_uring 的连接管理
 > 在饱和状态下仍有余力处理更多请求，"优雅降级"能力更强。
+
+**Q：Scheduler 组件是怎么实现的？**
+
+> A：`src/scheduler/` 提供了两个核心组件——
+> 1）`TaskQueue`：线程安全 fd 队列，支持 max_size 容量限制（满则 503）、
+>    入队时间戳记录 + 出队时计算 `queue_wait_ms`、超时自动取消（close 过期 fd）。
+> 2）`WorkerPool`：封装 N 个 worker 线程，从 TaskQueue 消费 fd 并执行 handler。
+>
+> epoll 路径使用 TaskQueue + WorkerPool（经典线程池调度）；
+> io_uring 路径调度由 CQE 驱动协程恢复（Proactor 模型），accept 后直接记录时间戳
+> 计算 queue_wait_ms。两者都在日志中输出 `queue_wait_ms` 字段，
+> 便于观测请求在调度层的等待时间。
 
 ### 4.3 SSE 与流式
 

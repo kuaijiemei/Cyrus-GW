@@ -16,6 +16,8 @@ struct GatewayConfigSnapshot {
     std::int32_t rate_limit_refill_per_sec{200};
     std::int32_t sse_first_chunk_timeout_ms{5000};
     std::int32_t sse_total_timeout_ms{120000};
+    std::int32_t queue_max_size{2000};
+    std::int32_t queue_timeout_ms{0};
 };
 
 }  // namespace cyrus

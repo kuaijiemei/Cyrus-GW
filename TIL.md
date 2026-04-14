@@ -264,3 +264,23 @@
   - 正常路径：低并发下不误伤，正常请求通过。
   - 异常路径：高并发突发下稳定触发 `429`。
 - 关联文件：`gateway-cpp/src/limiter/token_bucket.cpp`
+
+---
+
+### [2026-04-14] 模块：scheduler 调度层抽象（TODO 5.2）
+
+- 现象：`epoll_server.cpp` 中内联了 `std::queue<int>` + `mutex` + `condition_variable` + worker 线程管理逻辑；`iouring_server.cpp` 的调度隐含在 CQE 协程恢复中。`src/scheduler/` 目录只有占位文件（`task_queue_placeholder()`、`worker_pool_placeholder()`），与 `DEMO_SCRIPT.md` 架构图中的"Scheduler"模块不一致。
+- 根因：MVP 阶段优先保证功能跑通，调度逻辑直接内联在各自的 server 实现中，未提前做抽象。
+- 解决方案：
+  1. 新增 `TaskQueue`（`scheduler/task_queue.h/.cpp`）：线程安全 fd 队列，带 max_size 容量限制、入队时间戳记录、出队时计算 `queue_wait_ms`、超时自动取消（close 过期 fd）、优雅 shutdown（唤醒所有 worker + 清空残留 fd）。
+  2. 新增 `WorkerPool`（`scheduler/worker_pool.h/.cpp`）：封装 N 个 worker 线程，从 TaskQueue 消费 PopResult{fd, queue_wait_ms}，通过 handler 回调执行业务逻辑。
+  3. 重构 `epoll_server.cpp`：去掉内联队列，改用 `TaskQueue` + `WorkerPool`，队列满时返回 503。
+  4. 适配 `iouring_server.cpp`：在 accept CQE 到达后记录时间戳，传入 `handle_connection` 计算 `queue_wait_ms`。
+  5. 扩展 `log_http_request` 接口增加 `queue_wait_ms` 参数，日志输出中新增该字段。
+  6. `GatewayConfigSnapshot` 新增 `queue_max_size` / `queue_timeout_ms`，`config_loader` 解析 `queue.max_size` / `queue.timeout_ms`。
+- 防复发措施：`verify_week1.sh`、`verify_week4_2.sh` 端到端验证通过；epoll/iouring 两种模式均手动验证 `queue_wait_ms` 日志字段正确输出。
+- 关键踩坑点：io_uring 路径中 `accept_time` 必须在 `co_await UringAwaiter` **之后**记录，否则会把 idle 等待连接的时间也计入 `queue_wait_ms`（首次测试发现 `queue_wait_ms=1500` 即为此原因）。
+- 验证方式：
+  - 正常路径：`curl POST /chat` 非流式成功，日志含 `queue_wait_ms` 字段且低负载下为 0。
+  - 异常路径：队列满时返回 503（可通过设置 `queue.max_size=1` 触发）。
+- 关联文件：`scheduler/task_queue.h`、`scheduler/task_queue.cpp`、`scheduler/worker_pool.h`、`scheduler/worker_pool.cpp`、`net/epoll_server.cpp`、`net/iouring_server.cpp`、`common/logger.h`、`common/logger.cpp`、`common/models.h`、`common/config_loader.cpp`、`configs/gateway.yaml`

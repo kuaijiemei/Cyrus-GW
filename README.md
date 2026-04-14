@@ -65,7 +65,7 @@ Cyrus-GW/
   │       ├─ main.cpp
   │       ├─ net/
   │       ├─ api/
-  │       ├─ scheduler/
+  │       ├─ scheduler/          # TaskQueue + WorkerPool（调度抽象层）
   │       ├─ limiter/
   │       ├─ upstream/
   │       └─ common/
@@ -660,6 +660,28 @@ bash scripts/bench_week4_2.sh --mode=iouring --run=stream
 | 500 | **11,279 ms** | 11,504 ms | **11,520 ms** | 11,775 ms |
 
 核心结论：io_uring 在非流式极限并发（C=500）下吞吐是 epoll 的 **2.15 倍**，P50/P99 全档位优于 epoll。流式 TTFT 两者接近，因 Agent 单 worker 为主要瓶颈。详见 `BENCHMARK_RESULTS.md §5`。
+
+### 7.14 Scheduler 调度层抽象（src/scheduler）
+
+原先 epoll 路径的线程池队列内联在 `epoll_server.cpp`，io_uring 路径由 CQE 协程恢复隐式调度。
+现已将调度能力抽象为独立组件：
+
+| 文件 | 职责 |
+|---|---|
+| `scheduler/task_queue.h/.cpp` | 线程安全 fd 队列：max_size 容量限制、入队时间戳 + queue_wait_ms 统计、超时自动取消 |
+| `scheduler/worker_pool.h/.cpp` | 固定 worker 线程池，从 TaskQueue 消费 fd 并执行 handler |
+
+**epoll 路径**：使用 `TaskQueue` + `WorkerPool`（经典线程池调度），队列满时返回 503。
+
+**io_uring 路径**：调度由 CQE 驱动协程恢复（Proactor 模型），accept 完成后记录时间戳计算 `queue_wait_ms`。
+
+两条路径的日志均输出 `queue_wait_ms` 字段，可在 `gateway.yaml` 中配置：
+
+```yaml
+queue:
+  max_size: 2000      # TaskQueue 容量上限（epoll 路径）
+  timeout_ms: 0       # 入队超时（0=不限制）
+```
 
 ### 7.13 演示与讲解材料（TODO 4.4）
 

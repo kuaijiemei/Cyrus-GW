@@ -131,9 +131,12 @@ bool send_all_view(int fd, std::string_view data) {
 
 DetachedTask handle_connection(UringRing& ring, int client_fd,
                                const GatewayConfigSnapshot& cfg,
-                               cyrus::limiter::TokenBucket& bucket) {
+                               cyrus::limiter::TokenBucket& bucket,
+                               std::chrono::steady_clock::time_point accept_time) {
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
+    const int queue_wait_ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(t0 - accept_time).count());
 
     // 1. 异步读取 HTTP 请求头
     std::string raw;
@@ -175,7 +178,7 @@ DetachedTask handle_connection(UringRing& ring, int client_fd,
         (void)send_all(client_fd, resp);
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-        log_http_request(request_id, ms, 400, "", "/chat", false, -1, 0, "gateway");
+        log_http_request(request_id, ms, 400, "", "/chat", false, -1, 0, "gateway", queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         co_return;
@@ -186,7 +189,7 @@ DetachedTask handle_connection(UringRing& ring, int client_fd,
         (void)send_all(client_fd, resp);
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-        log_http_request("", ms, 200, "", "/health", false);
+        log_http_request("", ms, 200, "", "/health", false, -1, 0, "", queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         co_return;
@@ -197,7 +200,7 @@ DetachedTask handle_connection(UringRing& ring, int client_fd,
         (void)send_all(client_fd, resp);
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-        log_http_request(request_id, ms, 405, "", "/chat", false, -1, 0, "gateway");
+        log_http_request(request_id, ms, 405, "", "/chat", false, -1, 0, "gateway", queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         co_return;
@@ -209,7 +212,7 @@ DetachedTask handle_connection(UringRing& ring, int client_fd,
             (void)send_all(client_fd, resp);
             const int ms = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-            log_http_request(request_id, ms, 429, "rate_limited", "/chat", false, -1, 0, "gateway");
+            log_http_request(request_id, ms, 429, "rate_limited", "/chat", false, -1, 0, "gateway", queue_wait_ms);
             ::shutdown(client_fd, SHUT_RDWR);
             ::close(client_fd);
             co_return;
@@ -233,7 +236,7 @@ DetachedTask handle_connection(UringRing& ring, int client_fd,
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
         log_http_request(r.request_id, ms, r.status_code, r.tool_used, "/chat",
-                         r.stream, r.ttft_ms, r.retry_count, r.error_layer);
+                         r.stream, r.ttft_ms, r.retry_count, r.error_layer, queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         co_return;
@@ -244,7 +247,7 @@ DetachedTask handle_connection(UringRing& ring, int client_fd,
     (void)send_all(client_fd, resp);
     const int ms = static_cast<int>(
         std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-    log_http_request(request_id, ms, 404, "", path, false, -1, 0, "gateway");
+    log_http_request(request_id, ms, 404, "", path, false, -1, 0, "gateway", queue_wait_ms);
     ::shutdown(client_fd, SHUT_RDWR);
     ::close(client_fd);
 }
@@ -257,14 +260,15 @@ DetachedTask accept_loop(UringRing& ring, int listen_fd,
     for (;;) {
         auto* sqe = uring_get_sqe(ring);
         if (!sqe) {
-            // SQ 满，让出控制权后重试
             co_await std::suspend_always{};
             continue;
         }
         uring_prep_accept(sqe, listen_fd, nullptr, nullptr, 0);
         int client_fd = co_await UringAwaiter{sqe};
         if (client_fd < 0) continue;
-        handle_connection(ring, client_fd, cfg, bucket);
+        // accept CQE 到达即记录时间，协程立即分发到 handle_connection
+        const auto accept_time = std::chrono::steady_clock::now();
+        handle_connection(ring, client_fd, cfg, bucket, accept_time);
     }
 }
 

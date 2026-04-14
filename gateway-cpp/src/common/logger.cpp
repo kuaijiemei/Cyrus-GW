@@ -20,7 +20,8 @@ void log_startup(std::string_view message) noexcept {
 
 void log_http_request(const std::string& request_id, int latency_ms, int status_code,
                       const std::string& tool_used, const std::string& path, bool stream,
-                      int ttft_ms, int retry_count, const std::string& error_layer) noexcept {
+                      int ttft_ms, int retry_count, const std::string& error_layer,
+                      int queue_wait_ms) noexcept {
     try {
         std::cerr << "{\"" << log_fields::kRequestId << "\":\"" << json_escape(request_id) << "\",\""
                   << log_fields::kLatencyMs << "\":" << latency_ms << ",\"" << log_fields::kStatusCode << "\":"
@@ -33,6 +34,9 @@ void log_http_request(const std::string& request_id, int latency_ms, int status_
         std::cerr << ",\"" << log_fields::kRetryCount << "\":" << retry_count;
         if (!error_layer.empty()) {
             std::cerr << ",\"" << log_fields::kErrorLayer << "\":\"" << json_escape(error_layer) << "\"";
+        }
+        if (queue_wait_ms >= 0) {
+            std::cerr << ",\"" << log_fields::kQueueWaitMs << "\":" << queue_wait_ms;
         }
         std::cerr << "}\n";
     } catch (...) {

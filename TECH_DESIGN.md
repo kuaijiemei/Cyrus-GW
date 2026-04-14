@@ -111,10 +111,12 @@ LLM / Tools
 - 限流（Token Bucket）
 - 超时控制
 
-### 实现建议（MVP）
+### 实现（当前）
 
-- 内存队列（线程池队列或协程队列）
-- 单机内存限流计数
+- `scheduler/TaskQueue`：线程安全 fd 队列（max_size 容量限制 + 入队时间戳 + queue_wait_ms 统计 + 超时自动取消）
+- `scheduler/WorkerPool`：固定 worker 线程池从 TaskQueue 消费
+- epoll 路径使用 TaskQueue + WorkerPool；io_uring 路径由 CQE 驱动协程恢复
+- 单机内存限流计数（TokenBucket）
 - Redis 可选，不作为强依赖
 
 ## 4.3 Python Agent Service（AI 核心）
@@ -274,9 +276,11 @@ Cyrus-GW/
 
 ## 7.3 调度与排队
 
-- 入站请求先入队，再由 worker 拉取处理
-- 队列长度与等待时长可观测
-- 超时请求主动取消，避免积压
+- `scheduler/TaskQueue`：入站请求先入队（带时间戳），由 `WorkerPool` 拉取处理
+- 队列长度可通过 `TaskQueue::size()` 查询，`queue_wait_ms` 在出队时自动计算并输出到日志
+- 超时请求主动取消（`queue_timeout_ms` 配置），避免积压
+- epoll 路径：`TaskQueue` + `WorkerPool`（经典线程池调度）
+- io_uring 路径：CQE 驱动协程恢复，accept 后记录时间戳计算 `queue_wait_ms`
 
 ## 7.4 Token Bucket 限流
 

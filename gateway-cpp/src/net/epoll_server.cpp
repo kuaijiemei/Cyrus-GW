@@ -1,17 +1,14 @@
 // ---------------------------------------------------------------------------
 // epoll + 线程池 HTTP 服务（对照实现）。
-// 架构：主线程 epoll_wait 监听 listen fd，accept 后将 client fd 入队；
-//       N 个 worker 线程从队列取 fd，以阻塞 I/O 完成"读请求 → 处理 → 写响应 → 关闭"。
+// 架构：主线程 epoll_wait 监听 listen fd，accept 后将 client fd 入队 TaskQueue；
+//       WorkerPool 中 N 个 worker 线程从队列取 fd，以阻塞 I/O 完成
+//       "读请求 → 处理 → 写响应 → 关闭"。
 //
 // 关键分支原因：
 //   - 仅对 listen fd 做 epoll，不对 client fd 注册 epoll 事件——worker 直接阻塞
 //     recv/send，简化实现且与 io_uring 主实现形成 Reactor vs Proactor 对比。
-//   - 线程池 + 条件变量：经典并发模式，thread context switch 开销即为对比基线。
-//
-// 易踩坑点：
-//   - accept() 在 listen fd 为 blocking 时可能阻塞到下一个 EPOLLIN，改为
-//     非阻塞 accept 并循环到 EAGAIN 可避免 epoll 惊群后空转。
-//   - worker 线程需在 shutdown 时被 notify_all 唤醒，否则会永久等待。
+//   - 调度逻辑已抽象到 scheduler/TaskQueue + WorkerPool，支持
+//     queue_wait_ms 统计、队列容量限制、超时任务自动取消。
 // ---------------------------------------------------------------------------
 #include "net/epoll_server.h"
 
@@ -20,6 +17,8 @@
 #include "common/logger.h"
 #include "limiter/token_bucket.h"
 #include "net/http_common.h"
+#include "scheduler/task_queue.h"
+#include "scheduler/worker_pool.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -29,15 +28,11 @@
 #include <unistd.h>
 
 #include <chrono>
-#include <condition_variable>
 #include <cstring>
 #include <iostream>
-#include <mutex>
-#include <queue>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 namespace cyrus::net {
@@ -123,9 +118,10 @@ bool send_all_view(int fd, std::string_view data) {
     return true;
 }
 
-// ---- worker 线程：完整处理一条连接 ----
+// ---- worker handler：完整处理一条连接 ----
 
-void handle_connection(int client_fd, const GatewayConfigSnapshot& cfg,
+void handle_connection(int client_fd, int queue_wait_ms,
+                       const GatewayConfigSnapshot& cfg,
                        cyrus::limiter::TokenBucket& bucket) {
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
@@ -145,7 +141,7 @@ void handle_connection(int client_fd, const GatewayConfigSnapshot& cfg,
         (void)send_all(client_fd, resp);
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-        log_http_request(request_id, ms, 400, "", "/chat", false, -1, 0, "gateway");
+        log_http_request(request_id, ms, 400, "", "/chat", false, -1, 0, "gateway", queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         return;
@@ -156,7 +152,7 @@ void handle_connection(int client_fd, const GatewayConfigSnapshot& cfg,
         (void)send_all(client_fd, resp);
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-        log_http_request("", ms, 200, "", "/health", false);
+        log_http_request("", ms, 200, "", "/health", false, -1, 0, "", queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         return;
@@ -167,7 +163,7 @@ void handle_connection(int client_fd, const GatewayConfigSnapshot& cfg,
         (void)send_all(client_fd, resp);
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-        log_http_request(request_id, ms, 405, "", "/chat", false, -1, 0, "gateway");
+        log_http_request(request_id, ms, 405, "", "/chat", false, -1, 0, "gateway", queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         return;
@@ -179,7 +175,7 @@ void handle_connection(int client_fd, const GatewayConfigSnapshot& cfg,
             (void)send_all(client_fd, resp);
             const int ms = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-            log_http_request(request_id, ms, 429, "rate_limited", "/chat", false, -1, 0, "gateway");
+            log_http_request(request_id, ms, 429, "rate_limited", "/chat", false, -1, 0, "gateway", queue_wait_ms);
             ::shutdown(client_fd, SHUT_RDWR);
             ::close(client_fd);
             return;
@@ -203,7 +199,7 @@ void handle_connection(int client_fd, const GatewayConfigSnapshot& cfg,
         const int ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
         log_http_request(r.request_id, ms, r.status_code, r.tool_used, "/chat",
-                         r.stream, r.ttft_ms, r.retry_count, r.error_layer);
+                         r.stream, r.ttft_ms, r.retry_count, r.error_layer, queue_wait_ms);
         ::shutdown(client_fd, SHUT_RDWR);
         ::close(client_fd);
         return;
@@ -214,7 +210,7 @@ void handle_connection(int client_fd, const GatewayConfigSnapshot& cfg,
     (void)send_all(client_fd, resp);
     const int ms = static_cast<int>(
         std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t0).count());
-    log_http_request(request_id, ms, 404, "", path, false, -1, 0, "gateway");
+    log_http_request(request_id, ms, 404, "", path, false, -1, 0, "gateway", queue_wait_ms);
     ::shutdown(client_fd, SHUT_RDWR);
     ::close(client_fd);
 }
@@ -257,37 +253,26 @@ void EpollServer::run() {
         static_cast<double>(cfg_.rate_limit_capacity),
         static_cast<double>(cfg_.rate_limit_refill_per_sec));
 
-    // 线程池
     unsigned num_threads = std::thread::hardware_concurrency();
     if (num_threads < 1) num_threads = 4;
 
-    std::queue<int> work_queue;
-    std::mutex queue_mu;
-    std::condition_variable queue_cv;
-    bool shutdown = false;
+    // 使用 scheduler 组件取代内联队列 + 手工线程管理
+    cyrus::scheduler::TaskQueue task_queue(
+        static_cast<std::size_t>(cfg_.queue_max_size),
+        cfg_.queue_timeout_ms);
 
-    std::vector<std::thread> workers;
-    workers.reserve(num_threads);
-    for (unsigned i = 0; i < num_threads; ++i) {
-        workers.emplace_back([&]() {
-            for (;;) {
-                int fd = -1;
-                {
-                    std::unique_lock<std::mutex> lock(queue_mu);
-                    queue_cv.wait(lock, [&] { return !work_queue.empty() || shutdown; });
-                    if (shutdown && work_queue.empty()) return;
-                    fd = work_queue.front();
-                    work_queue.pop();
-                }
-                if (fd >= 0) handle_connection(fd, cfg_, global_bucket);
-            }
+    cyrus::scheduler::WorkerPool pool(
+        task_queue,
+        [&](int fd, int queue_wait_ms) {
+            handle_connection(fd, queue_wait_ms, cfg_, global_bucket);
         });
-    }
+    pool.start(num_threads);
 
     {
         std::ostringstream oss;
         oss << "epoll listening " << cfg_.listen_host << ":"
-            << cfg_.listen_port << " threads=" << num_threads;
+            << cfg_.listen_port << " threads=" << num_threads
+            << " queue_max=" << cfg_.queue_max_size;
         log_startup(oss.str());
     }
 
@@ -302,28 +287,25 @@ void EpollServer::run() {
         }
         for (int i = 0; i < n; ++i) {
             if (events[i].data.fd != listen_fd) continue;
-            // 非阻塞 accept：一次 EPOLLIN 可能多个连接就绪
             for (;;) {
                 const int client_fd = ::accept(listen_fd, nullptr, nullptr);
                 if (client_fd < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                     break;
                 }
-                {
-                    std::lock_guard<std::mutex> lock(queue_mu);
-                    work_queue.push(client_fd);
+                if (!task_queue.push(client_fd)) {
+                    // 队列满，直接拒绝（503 Service Unavailable）
+                    auto resp = http::format_json_response(
+                        503, R"({"error":"queue_full","message":"server overloaded"})");
+                    (void)send_all(client_fd, resp);
+                    ::shutdown(client_fd, SHUT_RDWR);
+                    ::close(client_fd);
                 }
-                queue_cv.notify_one();
             }
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(queue_mu);
-        shutdown = true;
-    }
-    queue_cv.notify_all();
-    for (auto& t : workers) t.join();
+    pool.stop();
     ::close(epoll_fd);
     ::close(listen_fd);
 }

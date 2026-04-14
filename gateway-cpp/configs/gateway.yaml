@@ -12,6 +12,7 @@ rate_limit:
 
 queue:
   max_size: 2000
+  timeout_ms: 0
 
 sse:
   first_chunk_timeout_ms: 5000
