@@ -476,6 +476,214 @@ bash gateway-cpp/scripts/verify_2_5.sh
 
 该脚本适合里程碑汇报或面试演示，输出末尾会打印 `done: Week 2 milestone verify finished`。
 
+### 7.10 Week 4.2 压测脚本与命令固化（TODO 4.2）
+
+仓库根目录提供两类脚本：
+
+- `scripts/bench_week4_2.sh`：固化并执行压测命令（非流式 + 流式 TTFT）
+- `scripts/verify_week4_2.sh`：4.2 一键验收（中文彩色 PASS/FAIL/SKIP）
+
+本轮排障后的关键行为：
+
+- `scripts/bench_week4_2.sh` 在实际执行压测前，会先检查 `Gateway(:8080)` 与 `Agent(:8001)` 是否可用
+- 若未运行，脚本会自动拉起 `mock LLM(:19943) + Agent(:8001) + Gateway(:8080)`，避免 TTFT 因上游未启动而出现整批 `502` 或 `timed out`
+- 若服务已在运行，则直接复用，不重复起进程
+
+先看固定命令（不执行）：
+
+```bash
+bash scripts/bench_week4_2.sh --mode=epoll --print-only
+```
+
+默认固化参数（脚本内置）：
+
+- 并发档位：`100,300,500`
+- 预热：`10s`
+- 采样：`30s`
+- 非流式工具：优先 `wrk`，缺失时降级 `hey`
+- 流式：`python3 scripts/stream_ttft_bench.py` 记录 `TTFT avg/p50/p95/p99`
+
+执行完整压测（会实际发请求）：
+
+```bash
+# epoll 对照实现
+bash scripts/bench_week4_2.sh --mode=epoll
+
+# io_uring 主实现（需内核启用 io_uring）
+bash scripts/bench_week4_2.sh --mode=iouring
+```
+
+仅执行某一类：
+
+```bash
+# 仅非流式
+bash scripts/bench_week4_2.sh --mode=epoll --run=non-stream
+
+# 仅流式 TTFT
+bash scripts/bench_week4_2.sh --mode=epoll --run=stream
+```
+
+4.2 一键验收：
+
+```bash
+bash scripts/verify_week4_2.sh
+```
+
+脚本覆盖：
+
+- 命令固化项是否包含 `100/300/500` + 预热 + 采样时长
+- 流式 TTFT 命令是否可执行（正常路径）
+- 非法参数是否被拒绝（异常路径）
+
+说明：仓库中已有 `scripts/verify_week3_2.sh`（Week 3 Tool 框架验收），Week 4.2 使用 `scripts/verify_week4_2.sh`，避免覆盖旧里程碑脚本。
+
+### 7.11 本机对比测试步骤（epoll vs io_uring）
+
+下面这组步骤适合你在当前 Linux VM 上直接做“小规模先确认脚本行为，再跑正式档位”的对比测试。
+
+#### Step 1：确认环境
+
+先确认 `agent-py/.venv` 已准备好，且 `gateway-cpp/build/cyrus-gateway` 已编译完成。
+
+可选确认：
+
+```bash
+ls agent-py/.venv/bin/python
+ls gateway-cpp/build/cyrus-gateway
+```
+
+若要跑 `io_uring` 对比，还需确认内核已启用：
+
+```bash
+sysctl kernel.io_uring_disabled
+```
+
+期望输出为 `kernel.io_uring_disabled = 0`；若不是，可先执行：
+
+```bash
+sudo sysctl -w kernel.io_uring_disabled=0
+```
+
+#### Step 2：从空端口状态开始
+
+建议每次对比前都先确认 `8080/8001` 没有残留进程，让脚本完整走一次“自动拉起”路径：
+
+```bash
+lsof -i :8080
+lsof -i :8001
+```
+
+若无输出，说明当前端口空闲。
+
+#### Step 3：先跑小规模 smoke test
+
+先用小并发验证脚本和链路是否稳定：
+
+```bash
+# epoll
+bash scripts/bench_week4_2.sh --mode=epoll --run=stream --levels=2 --duration-sec=5 --warmup-sec=3
+
+# io_uring
+bash scripts/bench_week4_2.sh --mode=iouring --run=stream --levels=2 --duration-sec=5 --warmup-sec=3
+```
+
+期望关注点：
+
+- 是否打印 `自动拉起 mock LLM + Agent + Gateway`
+- TTFT 结果是否为 `成功/失败 : N/0`
+- 是否输出 `TTFT avg/p50/p95/p99`
+
+本轮已验证的一个样例结果是：
+
+- `epoll` + `--levels=2` + `--run=stream` 下，TTFT 采样为 `4/0` 成功，`TTFT avg(ms) = 44.64`
+
+#### Step 4：再跑正式对比
+
+小规模确认通过后，再跑正式档位：
+
+```bash
+# epoll 对照实现
+bash scripts/bench_week4_2.sh --mode=epoll
+
+# io_uring 主实现
+bash scripts/bench_week4_2.sh --mode=iouring
+```
+
+如果只想分别看吞吐和流式 TTFT，也可以拆开跑：
+
+```bash
+# 非流式吞吐/延迟
+bash scripts/bench_week4_2.sh --mode=epoll --run=non-stream
+bash scripts/bench_week4_2.sh --mode=iouring --run=non-stream
+
+# 流式 TTFT
+bash scripts/bench_week4_2.sh --mode=epoll --run=stream
+bash scripts/bench_week4_2.sh --mode=iouring --run=stream
+```
+
+#### Step 5：记录对比结果
+
+建议按下面四类指标整理 `epoll` 与 `io_uring` 两组输出：
+
+- 非流式：`Requests/sec`
+- 非流式：`Latency` 与 `P95/P99`
+- 非流式：`Non-2xx or 3xx responses`
+- 流式：`TTFT avg/p50/p95/p99`
+
+这样后续进入 TODO 4.3 时，可以直接把同一台机器、同一脚本、同一档位下的结果整理成对比表。
+
+### 7.12 压测结果速览（TODO 4.3）
+
+完整数据与分析见 `BENCHMARK_RESULTS.md`。以下是关键对比结论（开发者本机亲测数据）：
+
+**非流式吞吐（wrk, 15s 正式采样）**
+
+| 并发 | epoll RPS | iouring RPS | 差异 |
+|---|---|---|---|
+| 100 | 37.22 | **37.99** | +2.1% |
+| 300 | 24.39 | **25.04** | +2.7% |
+| 500 | 6.03 | **13.00** | **+115.6%** |
+
+**非流式延迟（C=100, P50/P99）**
+
+| 指标 | epoll | iouring |
+|---|---|---|
+| P50 | 2.27 s | **2.24 s** |
+| P99 | 4.38 s | **4.34 s** |
+
+**流式 TTFT（正式采样，全档位 100% 成功）**
+
+| 并发 | epoll P50 | iouring P50 | epoll P99 | iouring P99 |
+|---|---|---|---|---|
+| 100 | **2,163 ms** | 2,310 ms | **2,274 ms** | 2,744 ms |
+| 300 | 6,763 ms | **6,734 ms** | 6,953 ms | **6,904 ms** |
+| 500 | **11,279 ms** | 11,504 ms | **11,520 ms** | 11,775 ms |
+
+核心结论：io_uring 在非流式极限并发（C=500）下吞吐是 epoll 的 **2.15 倍**，P50/P99 全档位优于 epoll。流式 TTFT 两者接近，因 Agent 单 worker 为主要瓶颈。详见 `BENCHMARK_RESULTS.md §5`。
+
+### 7.13 演示与讲解材料（TODO 4.4）
+
+完成 Week 4.4 后，项目新增以下演示材料：
+
+| 文件 | 内容 |
+|---|---|
+| `DEMO_SCRIPT.md` | 架构图（双服务）、时序图（普通/Tool/流式 三种路径）、5 分钟演示流程（7 步口播 + curl 命令）、常见追问答辩点（15+ 问答）、TIL Top 5 问题提炼 |
+| `scripts/verify_week4_4.sh` | 一键验证 §4.4 全部交付物（26 项检查，含正常路径 + 禁止项异常路径） |
+
+**使用方式**：
+
+```bash
+# 验证 §4.4 全部交付物
+bash scripts/verify_week4_4.sh
+
+# 面试前快速过一遍演示流程
+cat DEMO_SCRIPT.md
+```
+
+**演示时间分配建议**（5 分钟）：
+
+1. 开场介绍（30s）→ 2. 非流式对话（60s）→ 3. 流式 SSE（60s）→ 4. Tool 调用（60s）→ 5. 限流（30s）→ 6. 压测数据（60s）→ 7. 总结（30s）
+
 ---
 
 ## 8. 配置建议

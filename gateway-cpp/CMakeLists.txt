@@ -18,5 +18,8 @@ target_include_directories(cyrus-gateway PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/sr
 if(MSVC)
   target_compile_options(cyrus-gateway PRIVATE /W4 /permissive-)
 else()
-  target_compile_options(cyrus-gateway PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(cyrus-gateway PRIVATE -Wall -Wextra -Wpedantic -fcoroutines)
 endif()
+
+find_package(Threads REQUIRED)
+target_link_libraries(cyrus-gateway PRIVATE Threads::Threads)

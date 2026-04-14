@@ -40,6 +40,66 @@
 
 ## 3) 问题清单（按时间倒序追加）
 
+### [2026-04-14] 模块：demo-script-verify（TODO 4.4）
+
+- 现象：`verify_week4_4.sh` 第一版在首条 `check()` 调用后立即退出（exit code 1），只输出 1 条 PASS 就终止，后续 25 条检查全未执行。
+- 根因：脚本使用了 `set -e`（遇错即退），同时计数器用 `((PASS++))`。当 `PASS` 从 0 递增时，`((0++))` 的返回值是 0（bash 算术表达式中 0 视为 false），导致 `set -e` 将其当作命令失败而提前退出。这是 bash 算术扩展与 `set -e` 的已知交互陷阱。
+- 解决方案：将 `((PASS++))` 改为 `PASS=$((PASS + 1))`，后者始终返回 exit code 0，不触发 `set -e`。同理修改 `((FAIL++))`。
+- 防复发措施：验收脚本中计数器操作一律使用 `VAR=$((VAR + 1))` 形式，避免 `((VAR++))` 与 `set -e` 的兼容性问题；新增脚本后至少跑一次空环境冒烟测试。
+- 验证方式：
+  - 正常路径：`bash scripts/verify_week4_4.sh` 输出 PASS=26 FAIL=0，全部检查项均执行。
+  - 异常路径：故意删除 `DEMO_SCRIPT.md` 后执行脚本，对应检查项应报 FAIL 并继续执行后续项。
+- 关联文件：`scripts/verify_week4_4.sh`、`DEMO_SCRIPT.md`
+
+### [2026-04-14] 模块：benchmark-data-collection（TODO 4.3）
+
+- 现象：使用 `bench_week4_2.sh` 采集 C=100/300/500 正式数据时，wrk 非流式在 C=300/500 档位输出 `0 requests`、latency 全零（`-nan%`），C=100 也仅 7 RPS 且 60% 以上超时。同时流式 TTFT 在 C=100 全部超时（0/200），但 C=300 反而能 600/600 通过——现象前后矛盾。
+- 根因：两层叠加导致：① mock LLM 初版使用 Python `http.server.HTTPServer`（单线程阻塞），100+ 并发下串行处理导致排队时间远超 wrk 默认 2s 超时；② wrk 默认 `--timeout` 为 2s，而 Gateway→Agent→mock LLM 端到端延迟在 C=100 时已达 ~600ms×并发排队≈数秒。C=100 流式全超时但 C=300 通过的原因是测试顺序导致：C=100 流式排在 6 轮非流式 wrk 之后执行，系统此时处于积压状态；到 C=300 时积压已消化。
+- 解决方案：① 将 mock LLM 改为 `ThreadingHTTPServer`（`socketserver.ThreadingMixIn + HTTPServer`），使其能并发处理请求；② 给 wrk 命令添加 `--timeout 10s`，避免在正常 Agent 排队延迟下误报超时；③ 同时添加 `--latency` 参数以输出 P50/P90/P99 分位数（§4.3 采集 P95/P99 的必要条件）。
+- 防复发措施：后续涉及压测的 mock 服务统一使用 `ThreadingHTTPServer`（或 uvicorn 多 worker），避免 mock 成为瓶颈；wrk 的 `--timeout` 应与 Gateway 的 `agent_timeout_ms` 对齐（建议 ≥ 上游超时 × 1.5）。
+- 验证方式：
+  - 正常路径：开发者本机 `bash scripts/bench_week4_2.sh --mode=epoll --warmup-sec=5 --duration-sec=15`，C=100 wrk 输出 37.22 RPS、0 超时、0 Non-2xx；全部 TTFT 采样（C=100/300/500）100% 成功。
+  - 异常路径：C=500 非流式 wrk 15s 采样全超时（91/91），确认瓶颈在 Agent uvicorn 单 worker + GIL，Gateway 连接维持能力完好。
+- 关联文件：`scripts/bench_week4_2.sh`、`BENCHMARK_RESULTS.md`、`bench_epoll.log`、`bench_iouring.log`
+
+### [2026-04-14][专项排障 / DEBUG] 模块：benchmark-command-solidification-ttft（TODO 4.2）
+
+- 现象：`bash scripts/bench_week4_2.sh --mode=epoll --run=stream` 在执行 TTFT 采样时，出现两类明显异常：一类是 `成功/失败 : 0/100` 且失败样本全为 `status=502 error=http_error_502`；另一类是 `wrk` 显示 `0 requests`、TTFT 采样全部 `timed out`。同一仓库里直接单独运行 `python3 scripts/stream_ttft_bench.py ...` 又能在低并发下得到 `4/0` 成功，现象前后不一致。
+- 根因：压测脚本初版只负责“打印并执行命令”，没有在执行前确保 mock LLM、Agent、Gateway 已就绪。结果是：
+  - 当 `8001` 上没有 Agent 时，Gateway 转发流式请求立即返回 `502`；
+  - 当 `8080` 上没有可用 Gateway 或脚本上一轮残留状态不一致时，非流式压测会表现为 `0 requests`，流式则表现为连接超时。
+- 解决方案：在 `scripts/bench_week4_2.sh` 中补充 `ensure_services()`，执行压测前自动检查并拉起 mock LLM（`:19943`）、Agent（`:8001`）、Gateway（`:8080`）；若服务已在运行则直接复用，若是脚本自己拉起则在退出时通过 `trap` 清理。最终将“环境准备”纳入压测入口本身，而不是依赖人工先手动起服务。
+- 防复发措施：
+  - 将“压测前服务健康检查 + 自动拉起”固定为 `bench_week4_2.sh` 的标准行为，避免使用者忘记先起服务；
+  - 保留 `--print-only` 作为纯命令查看入口，真正执行时统一走 `ensure_services()`；
+  - 后续做 4.3 数据采集时，所有对比测试统一从空端口状态开始，先确认 `lsof -i :8080`、`lsof -i :8001` 无残留，再跑脚本，避免混入历史进程状态。
+- 验证方式：
+  - 正常路径：在 `8080/8001` 都未监听的前提下执行 `bash scripts/bench_week4_2.sh --mode=epoll --run=stream --levels=2 --duration-sec=5 --warmup-sec=3`，应看到脚本打印“自动拉起 mock LLM + Agent + Gateway（epoll）”，随后 TTFT 采样结果为 `成功/失败 : 4/0`，并给出 `TTFT avg/p50/p95/p99`。
+  - 异常路径：执行 `bash scripts/bench_week4_2.sh --mode=invalid --print-only`，应立即失败并提示 `--mode 仅支持 iouring/epoll/blocking`。
+- 关联文件：`scripts/bench_week4_2.sh`、`scripts/stream_ttft_bench.py`、`README.md`
+
+### [2026-04-14] 模块：benchmark-command-solidification（TODO 4.2）
+
+- 现象：Week 4.2 输出要求中写的是“新增 `scripts/verify_week3_2.sh` 一键验证脚本”，但仓库里该文件已被 Week 3.2（Tool 框架验收）占用；若直接覆盖会破坏已完成里程碑回归。
+- 根因：脚本命名与历史里程碑编号冲突，属于“验收入口命名”层面的流程问题，而非功能代码问题。
+- 解决方案：保留原有 `scripts/verify_week3_2.sh` 不变，新增 `scripts/verify_week4_2.sh` 作为 Week 4.2 专用入口，并在 `README.md` 明确两者职责边界（Week3 Tool 验收 vs Week4 压测命令固化验收）；同时新增 `scripts/bench_week4_2.sh`、`scripts/stream_ttft_bench.py`、`scripts/wrk_chat_non_stream.lua` 固化压测命令。
+- 防复发措施：后续新增验收脚本统一采用 `verify_week<week>_<module>.sh` 命名，新增前先检索仓库已有脚本，避免覆盖历史验证入口。
+- 验证方式：
+  - 正常路径：`bash scripts/verify_week4_2.sh` 输出 `PASS=6 FAIL=0`，并显示 `DONE: Week 4.2 压测脚本与命令固化 verify passed`。
+  - 异常路径：`bash scripts/bench_week4_2.sh --mode=invalid --print-only` 应立即失败并提示 `--mode 仅支持 iouring/epoll/blocking`。
+- 关联文件：`scripts/bench_week4_2.sh`、`scripts/verify_week4_2.sh`、`scripts/stream_ttft_bench.py`、`scripts/wrk_chat_non_stream.lua`、`README.md`
+
+### [2026-04-14] 模块：gateway-cpp/concurrent-model-prep（TODO 4.1）
+
+- 现象：io_uring 服务（`--mode=iouring`）在 RHEL 9 虚拟机上启动时 `io_uring_setup` 返回 `EPERM`（errno=1），所有 worker 线程初始化失败；`epoll + 线程池` 模式可正常运行，`blocking` 模式回归通过。
+- 根因：RHEL 9 / EL9 默认设置 `kernel.io_uring_disabled=2`（完全禁用 io_uring，含 root），这是上游 Red Hat 安全加固策略。即使 kernel 5.14 本身支持 io_uring，此 sysctl 仍会在 `io_uring_setup` 系统调用层面直接拒绝。
+- 解决方案：在 `IoUringServer::run()` 启动前增加 `check_iouring_available()` 探测，使用一次性 `io_uring_setup(4, ...)` 测试成功后立即销毁。若探测失败，输出结构化诊断信息（`iouring_disabled_by_kernel`）和修复命令（`sudo sysctl -w kernel.io_uring_disabled=0`），不创建 listener 也不启动 worker，避免大量线程报错刷屏。验证脚本 `verify_week4_1.sh` 在检测到 `io_uring_disabled != 0` 时将 io_uring 运行时用例标为 SKIP 而非 FAIL，仅验证编译产物和诊断输出。
+- 防复发措施：① CI/压测环境初始化脚本必须包含 `sysctl -w kernel.io_uring_disabled=0`；② 文档（README §7.2）增加"RHEL 9 io_uring 启用"步骤；③ 后续若做 Docker 化，在 Dockerfile 的 `CMD` 或 `entrypoint` 中检查 sysctl 并打印提示。
+- 验证方式：
+  - 正常路径：在 `io_uring_disabled=0` 环境下 `bash scripts/verify_week4_1.sh` 应输出 io_uring / epoll / blocking 三种模式全部 PASS（包含 /health + /chat e2e）。
+  - 异常路径：在 `io_uring_disabled=2` 环境下同脚本应输出 io_uring SKIP + 诊断 PASS，epoll/blocking 全量 PASS，总结 FAIL=0。
+- 关联文件：`gateway-cpp/src/net/iouring_server.cpp`、`gateway-cpp/src/net/uring_compat.h`、`gateway-cpp/src/net/epoll_server.cpp`、`gateway-cpp/src/main.cpp`、`scripts/verify_week4_1.sh`
+
 ### [2026-04-14] 模块：week3-milestone-verify（TODO 3.5）
 
 - 现象：手工按顺序分别跑 `verify_week3_1.sh`、`verify_week3_2.sh`、`verify_week3_3.sh` 时，演示或回归容易漏跑其中一段，或中途失败后误以为「后面两段已通过」；对外统一说「Week3 过了」但缺少单一入口证据。

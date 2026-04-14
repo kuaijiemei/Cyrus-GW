@@ -1,0 +1,193 @@
+======================================================
+Week 4.2 压测命令固化
+目标模式       : epoll
+目标地址       : http://127.0.0.1:8080
+非流式工具     : wrk
+并发档位       : 100,300,500
+预热时长(秒)   : 5
+采样时长(秒)   : 15
+======================================================
+[0;32m[通过][0m 压测工具选择完成（wrk）
+
+[固化命令] 非流式压测
+  C=100: wrk -t4 -c100 -d15s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+  C=300: wrk -t4 -c300 -d15s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+  C=500: wrk -t4 -c500 -d15s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+
+[固化命令] 流式 TTFT 采样
+  C=100: python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 100 --requests 200 --timeout-ms 30000 --request-id-prefix ttft-epoll
+  C=300: python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 300 --requests 600 --timeout-ms 30000 --request-id-prefix ttft-epoll
+  C=500: python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 500 --requests 1000 --timeout-ms 30000 --request-id-prefix ttft-epoll
+
+[0;36m[信息][0m 自动拉起 mock LLM + Agent + Gateway（epoll）...
+[0;32m[通过][0m mock LLM(:19943) + Agent(:8001) 已就绪
+[0;32m[通过][0m Gateway(:8080, mode=epoll) 已就绪
+
+[执行阶段] 非流式压测（含预热）
+[0;36m[信息][0m 执行：wrk -t4 -c100 -d5s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+Running 5s test @ http://127.0.0.1:8080/chat
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.81s   689.55ms   2.40s    79.63%
+    Req/Sec    13.14      7.29    40.00     85.53%
+  Latency Distribution
+     50%    2.24s 
+     75%    2.27s 
+     90%    2.36s 
+     99%    2.38s 
+  216 requests in 5.02s, 42.61KB read
+Requests/sec:     43.02
+Transfer/sec:      8.49KB
+[0;36m[信息][0m 执行：wrk -t4 -c100 -d15s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+Running 15s test @ http://127.0.0.1:8080/chat
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     2.48s   522.23ms   4.50s    87.90%
+    Req/Sec    21.85     14.53    70.00     62.61%
+  Latency Distribution
+     50%    2.27s 
+     75%    2.46s 
+     90%    3.26s 
+     99%    4.38s 
+  562 requests in 15.10s, 110.86KB read
+Requests/sec:     37.22
+Transfer/sec:      7.34KB
+[0;36m[信息][0m 执行：wrk -t4 -c300 -d5s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+Running 5s test @ http://127.0.0.1:8080/chat
+  4 threads and 300 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.59s   812.19ms   5.00s    59.84%
+    Req/Sec    15.62      7.58    30.00     78.95%
+  Latency Distribution
+     50%    3.60s 
+     75%    4.31s 
+     90%    4.74s 
+     99%    4.95s 
+  127 requests in 5.03s, 25.05KB read
+Requests/sec:     25.23
+Transfer/sec:      4.98KB
+[0;36m[信息][0m 执行：wrk -t4 -c300 -d15s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+Running 15s test @ http://127.0.0.1:8080/chat
+  4 threads and 300 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     7.86s     1.08s    9.97s    55.92%
+    Req/Sec    18.90     10.93    60.00     69.57%
+  Latency Distribution
+     50%    7.60s 
+     75%    8.83s 
+     90%    9.52s 
+     99%    9.94s 
+  368 requests in 15.09s, 72.59KB read
+  Socket errors: connect 0, read 0, write 0, timeout 157
+Requests/sec:     24.39
+Transfer/sec:      4.81KB
+[0;36m[信息][0m 执行：wrk -t4 -c500 -d5s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+Running 5s test @ http://127.0.0.1:8080/chat
+  4 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.00      0.00     0.00      -nan%
+  Latency Distribution
+     50%    0.00us
+     75%    0.00us
+     90%    0.00us
+     99%    0.00us
+  0 requests in 5.06s, 0.00B read
+Requests/sec:      0.00
+Transfer/sec:       0.00B
+[0;36m[信息][0m 执行：wrk -t4 -c500 -d15s --latency --timeout 10s -s "/home/kuaijiemei/Cyrus-GW/scripts/wrk_chat_non_stream.lua" "http://127.0.0.1:8080/chat"
+Running 15s test @ http://127.0.0.1:8080/chat
+  4 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec    15.94     10.15    50.00     69.23%
+  Latency Distribution
+     50%    0.00us
+     75%    0.00us
+     90%    0.00us
+     99%    0.00us
+  91 requests in 15.08s, 17.95KB read
+  Socket errors: connect 0, read 0, write 0, timeout 91
+Requests/sec:      6.03
+Transfer/sec:      1.19KB
+
+[执行阶段] 流式 TTFT 采样（含预热）
+[0;36m[信息][0m 执行：python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 100 --requests 100 --timeout-ms 30000 --request-id-prefix ttft-epoll
+======================================================
+流式 TTFT 采样结果
+URL            : http://127.0.0.1:8080/chat
+并发           : 100
+总请求数       : 100
+成功/失败      : 100/0
+总耗时(秒)     : 13.27
+TTFT avg(ms)   : 12178.29
+TTFT p50(ms)   : 12184.49
+TTFT p95(ms)   : 13145.59
+TTFT p99(ms)   : 13213.28
+======================================================
+[0;36m[信息][0m 执行：python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 100 --requests 200 --timeout-ms 30000 --request-id-prefix ttft-epoll
+======================================================
+流式 TTFT 采样结果
+URL            : http://127.0.0.1:8080/chat
+并发           : 100
+总请求数       : 200
+成功/失败      : 200/0
+总耗时(秒)     : 4.46
+TTFT avg(ms)   : 1690.80
+TTFT p50(ms)   : 2163.25
+TTFT p95(ms)   : 2247.82
+TTFT p99(ms)   : 2274.13
+======================================================
+[0;36m[信息][0m 执行：python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 300 --requests 300 --timeout-ms 30000 --request-id-prefix ttft-epoll
+======================================================
+流式 TTFT 采样结果
+URL            : http://127.0.0.1:8080/chat
+并发           : 300
+总请求数       : 300
+成功/失败      : 300/0
+总耗时(秒)     : 6.92
+TTFT avg(ms)   : 3410.06
+TTFT p50(ms)   : 3443.16
+TTFT p95(ms)   : 6351.69
+TTFT p99(ms)   : 6666.80
+======================================================
+[0;36m[信息][0m 执行：python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 300 --requests 600 --timeout-ms 30000 --request-id-prefix ttft-epoll
+======================================================
+流式 TTFT 采样结果
+URL            : http://127.0.0.1:8080/chat
+并发           : 300
+总请求数       : 600
+成功/失败      : 600/0
+总耗时(秒)     : 13.71
+TTFT avg(ms)   : 5124.34
+TTFT p50(ms)   : 6763.43
+TTFT p95(ms)   : 6920.87
+TTFT p99(ms)   : 6953.31
+======================================================
+[0;36m[信息][0m 执行：python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 500 --requests 500 --timeout-ms 30000 --request-id-prefix ttft-epoll
+======================================================
+流式 TTFT 采样结果
+URL            : http://127.0.0.1:8080/chat
+并发           : 500
+总请求数       : 500
+成功/失败      : 500/0
+总耗时(秒)     : 11.48
+TTFT avg(ms)   : 5732.11
+TTFT p50(ms)   : 5766.27
+TTFT p95(ms)   : 10661.54
+TTFT p99(ms)   : 11090.53
+======================================================
+[0;36m[信息][0m 执行：python3 "/home/kuaijiemei/Cyrus-GW/scripts/stream_ttft_bench.py" --url "http://127.0.0.1:8080/chat" --concurrency 500 --requests 1000 --timeout-ms 30000 --request-id-prefix ttft-epoll
+======================================================
+流式 TTFT 采样结果
+URL            : http://127.0.0.1:8080/chat
+并发           : 500
+总请求数       : 1000
+成功/失败      : 1000/0
+总耗时(秒)     : 22.97
+TTFT avg(ms)   : 8559.16
+TTFT p50(ms)   : 11278.78
+TTFT p95(ms)   : 11491.24
+TTFT p99(ms)   : 11520.37
+======================================================
+[0;32m[通过][0m Week 4.2 压测命令执行完成。
