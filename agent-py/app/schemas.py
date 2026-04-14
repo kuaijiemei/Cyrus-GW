@@ -29,6 +29,7 @@ class AgentChatResponse(BaseModel):
     answer: str
     tool_used: str = ""
     model: str
+    retry_count: int = 0
 
 
 class AgentErrorResponse(BaseModel):

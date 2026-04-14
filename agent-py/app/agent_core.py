@@ -1,6 +1,7 @@
 """Agent core orchestration for TODO 1.3."""
 
 import uuid
+from typing import AsyncIterator
 
 from app.llm_client import LLMResult, OpenAICompatibleLLMClient
 from app.schemas import AgentChatRequest, AgentChatResponse
@@ -18,4 +19,9 @@ class AgentCore:
             answer=llm_result.answer,
             tool_used="",
             model=llm_result.model,
+            retry_count=llm_result.retry_count,
         )
+
+    async def handle_chat_stream(self, req: AgentChatRequest) -> AsyncIterator[str]:
+        async for delta in self._llm_client.generate_stream(req.message):
+            yield delta

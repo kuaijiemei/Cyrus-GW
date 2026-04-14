@@ -1,3 +1,9 @@
+// -----------------------------------------------------------------------------
+// POST /chat 网关侧处理：校验与解析请求、组装发往 Agent 的 JSON、映射上游 HTTP/传输错误。
+// 在网关尽早返回 400，把「客户端不合法」与「Agent/网络失败」分离，便于排障与监控归因（error_layer）。
+// request_id 贯穿错误体与日志；成功路径尽量透传 Agent 响应体，避免网关重复解析业务字段。
+// MVP 用手写 JSON 解析与 json_escape 拼包：轻依赖，但须与 Agent Pydantic 字段契约保持一致。
+// -----------------------------------------------------------------------------
 #include "api/chat_handler.h"
 
 #include "common/errors.h"
@@ -204,9 +210,11 @@ std::optional<ParsedChatRequest> parse_chat_request(const std::string& request_h
         request_id = *h;
     }
 
+    // 显式非 application/json 时拒绝：避免下游把二进制当 JSON 解析，错误语义固定在网关（gateway）。
     if (!content_type_allows_json(request_headers)) {
         out.status_code = 400;
         out.request_id = request_id;
+        out.error_layer = "gateway";
         out.json_body =
             error_body("content_type_must_be_application_json", request_id, ErrorCode::kGwBadRequest, "gateway");
         return std::nullopt;
@@ -214,28 +222,35 @@ std::optional<ParsedChatRequest> parse_chat_request(const std::string& request_h
 
     std::string trimmed = body;
     trim_inplace(trimmed);
+    // 空 body 无解析意义，不调 Agent，直接 400 降低无效负载。
     if (trimmed.empty()) {
         out.status_code = 400;
         out.request_id = request_id;
+        out.error_layer = "gateway";
         out.json_body = error_body("empty_body", request_id, ErrorCode::kGwBadRequest, "gateway");
         return std::nullopt;
     }
 
+    // 粗略 JSON 外形检查失败即 400：比传到 Agent 再失败更早、且错误层仍归 gateway。
     if (trimmed.front() != '{' || trimmed.back() != '}') {
         out.status_code = 400;
         out.request_id = request_id;
+        out.error_layer = "gateway";
         out.json_body = error_body("invalid_json", request_id, ErrorCode::kGwBadRequest, "gateway");
         return std::nullopt;
     }
 
+    // body 内 request_id 若合法则覆盖 Header 默认值：便于单条链路在多个 hop 间对齐同一主键。
     if (const auto rid = extract_json_string(trimmed, "request_id"); rid && !rid->empty()) {
         request_id = *rid;
     }
 
+    // message 为对外契约必填：在网关拦截，减少 Agent 无效调用与模糊错误。
     const auto message = extract_json_string(trimmed, "message");
     if (!message || message->empty()) {
         out.status_code = 400;
         out.request_id = request_id;
+        out.error_layer = "gateway";
         out.json_body = error_body("message_required", request_id, ErrorCode::kGwBadRequest, "gateway");
         return std::nullopt;
     }
@@ -251,6 +266,7 @@ std::optional<ParsedChatRequest> parse_chat_request(const std::string& request_h
 }
 
 std::string build_agent_payload(const ParsedChatRequest& req) {
+    // 字段经 json_escape 再拼接：防止用户内容打断 JSON 结构，否则 Agent 解析失败且难以归因。
     std::ostringstream oss;
     oss << "{\"request_id\":\"" << json_escape(req.request_id) << "\",\"message\":\""
         << json_escape(req.message) << "\",\"stream\":" << (req.stream ? "true" : "false");
@@ -264,7 +280,7 @@ std::string build_agent_payload(const ParsedChatRequest& req) {
 }  // namespace
 
 ChatHttpResponse handle_post_chat(const GatewayConfigSnapshot& cfg, const std::string& request_headers,
-                                  const std::string& body) {
+                                  const std::string& body, const StreamCallbacks* stream_callbacks) {
     ChatHttpResponse out;
 
     const auto parsed = parse_chat_request(request_headers, body, out);
@@ -276,15 +292,78 @@ ChatHttpResponse handle_post_chat(const GatewayConfigSnapshot& cfg, const std::s
     out.stream = parsed->stream;
 
     const std::string agent_payload = build_agent_payload(*parsed);
-    const auto upstream = upstream::post_agent_chat(cfg, agent_payload);
+    if (parsed->stream) {
+        // 流式分支：由上游逐 chunk 返回，网关只做透传与超时守卫，不缓存全量内容。
+        if (stream_callbacks == nullptr || !stream_callbacks->write_chunk) {
+            out.status_code = 500;
+            out.error_layer = "gateway";
+            out.json_body = error_body("stream_callbacks_missing", parsed->request_id, ErrorCode::kGwInternal,
+                                       "gateway");
+            return out;
+        }
+        const auto upstream_stream = upstream::stream_agent_chat(cfg, agent_payload, stream_callbacks->write_chunk);
+        if (!upstream_stream.transport_ok) {
+            if (upstream_stream.ttft_ms >= 0) {
+                std::ostringstream oss;
+                oss << "event: error\ndata: {\"request_id\":\"" << json_escape(parsed->request_id)
+                    << "\",\"error\":\"agent_timeout\",\"detail\":\"" << json_escape(upstream_stream.error)
+                    << "\"}\n\n";
+                (void)stream_callbacks->write_chunk(oss.str());
+                out.status_code = 200;
+                out.ttft_ms = upstream_stream.ttft_ms;
+                return out;
+            }
+            if (upstream_stream.timed_out) {
+                out.status_code = 504;
+                out.error_layer = "agent";
+                out.json_body = error_body("agent_timeout", parsed->request_id, ErrorCode::kGwUpstreamTimeout, "agent",
+                                           upstream_stream.error);
+            } else {
+                out.status_code = 502;
+                out.error_layer = "agent";
+                out.json_body = error_body("agent_unavailable", parsed->request_id, ErrorCode::kGwUpstreamUnavailable,
+                                           "agent", upstream_stream.error);
+            }
+            return out;
+        }
+        if (upstream_stream.http_status != 200) {
+            out.status_code = (upstream_stream.http_status == 504) ? 504 : 502;
+            out.error_layer = "agent";
+            out.json_body = error_body(
+                (upstream_stream.http_status == 504) ? "agent_timeout" : "agent_upstream_error", parsed->request_id,
+                (upstream_stream.http_status == 504) ? ErrorCode::kGwUpstreamTimeout : ErrorCode::kGwUpstreamUnavailable,
+                "agent", "agent stream returned non-200", upstream_stream.http_status);
+            return out;
+        }
+        out.status_code = 200;
+        out.ttft_ms = upstream_stream.ttft_ms;
+        if (stream_callbacks->on_ttft_ms && upstream_stream.ttft_ms >= 0) {
+            stream_callbacks->on_ttft_ms(upstream_stream.ttft_ms);
+        }
+        return out;
+    }
 
+    // 关键分支原因：Gateway 仅在「Agent 请求超时」时做有限重试，最多 1 次，避免无限重试放大故障。
+    const int retry_limit = std::clamp(cfg.agent_retry_max, 0, 1);
+    upstream::AgentClientResult upstream;
+    for (int attempt = 0;; ++attempt) {
+        upstream = upstream::post_agent_chat(cfg, agent_payload);
+        if (!(upstream.timed_out && !upstream.transport_ok) || attempt >= retry_limit) {
+            out.retry_count = attempt;
+            break;
+        }
+    }
+
+    // 未拿到合法 HTTP 响应：区分超时（504）与连接/发送/解析失败（502），对应「慢」与「不可用」两类运维动作。
     if (!upstream.transport_ok) {
         if (upstream.timed_out) {
             out.status_code = 504;
+            out.error_layer = "agent";
             out.json_body = error_body("agent_timeout", parsed->request_id, ErrorCode::kGwUpstreamTimeout, "agent",
                    upstream.error);
         } else {
             out.status_code = 502;
+            out.error_layer = "agent";
             out.json_body = error_body("agent_unavailable", parsed->request_id, ErrorCode::kGwUpstreamUnavailable,
                    "agent", upstream.error);
         }
@@ -300,14 +379,18 @@ ChatHttpResponse handle_post_chat(const GatewayConfigSnapshot& cfg, const std::s
         return out;
     }
 
+    // Agent 进程已响应但声明自身超时：保持 504，不把 LLM/Agent 超时伪装成网关 502。
     if (upstream.http_status == 504) {
         out.status_code = 504;
+        out.error_layer = "agent";
         out.json_body = error_body("agent_timeout", parsed->request_id, ErrorCode::kGwUpstreamTimeout, "agent",
                  "agent returned timeout", upstream.http_status);
         return out;
     }
 
+    // 其余非 200：MVP 统一 502，由 upstream_status/detail 保留排障信息，避免状态码矩阵爆炸。
     out.status_code = 502;
+    out.error_layer = "agent";
     out.json_body = error_body("agent_upstream_error", parsed->request_id, ErrorCode::kGwUpstreamUnavailable,
                "agent", "agent returned non-200", upstream.http_status);
     return out;

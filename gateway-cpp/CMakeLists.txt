@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# For clangd / IDE: generates build/compile_commands.json when you configure with CMake.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 file(GLOB_RECURSE CYRUS_GATEWAY_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )

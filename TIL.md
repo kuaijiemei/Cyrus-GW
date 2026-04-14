@@ -40,6 +40,61 @@
 
 ## 3) 问题清单（按时间倒序追加）
 
+### [2026-04-13] 模块：week2-milestone-verify（TODO 2.5）
+
+- 现象：单独运行 2.1/2.2/2.3/2.4 都通过，但里程碑演示时经常漏步骤或顺序混乱，导致“功能都做了却难一次讲清”；手工切换脚本还会出现“上一段残留进程未清理”引发端口占用误报。
+- 根因：Week2 验收项分散在多个脚本入口，缺少统一串行编排；当演示中断后手动重试，容易跳过某个验证段或忘记检查最终完成标记。
+- 解决方案：新增 `verify_week2_5.sh` / `verify_2_5.sh`，统一串行调用 2.1~2.4，并在每段前打印标题、末尾输出里程碑完成标识，降低演示路径分叉与人工失误概率。
+- 防复发措施：以后 Week2 对外演示统一使用 `bash scripts/verify_week2_5.sh`；若某段失败，只修该段后重新跑总脚本，确保最终输出完整链路。
+- 验证方式：
+  - 正常路径：运行总脚本后应依次看到 2.1/2.2/2.3/2.4 标题与各段成功输出，最后出现 `done: Week 2 milestone verify finished`。
+  - 异常路径：故意停掉某段依赖（如 mock/agent），总脚本应在对应子段失败处立即报错退出，便于快速定位模块。
+- 关联文件：`scripts/verify_week2_5.sh`、`gateway-cpp/scripts/verify_2_5.sh`
+
+### [2026-04-13] 模块：error-status-unification（TODO 2.4）
+
+- 现象：联调时“状态码正确但排障慢”，常见表现是：客户端拿到 429/502/504 却不确定失败层级；部分网关错误体缺少 `request_id`，跨 Gateway/Agent 日志难串联。
+- 根因：错误契约在多个出口分散定义。`/chat` 解析错误、限流错误、上游错误分别在不同函数返回，若其中任一出口漏掉 `request_id` 或 `error_layer`，就会出现“有错误、难定位”的问题。
+- 解决方案：统一网关错误体字段（`error/error_code/error_layer/request_id`），429 也回填 `request_id`；Gateway 日志新增 `error_layer`，并在 `/chat` 错误路径明确标记 `gateway` 或 `agent`；Agent 日志在 LLM 异常路径补 `error_layer=llm`，形成 gateway/agent/llm 分层证据。
+- 防复发措施：后续错误处理改动统一回归 `bash scripts/verify_week2_4.sh`，至少核对 3 个点：响应体有 `request_id`、状态码匹配预期、日志含失败层级。
+- 验证方式：
+  - 正常路径：非错误请求保持 200，不引入额外错误字段干扰。
+  - 异常路径：`2.4` 脚本覆盖 `400/429/502/504`，并输出 gateway/agent 两侧日志，能直接定位失败层级。
+- 关联文件：`gateway-cpp/src/net/http_server.cpp`、`gateway-cpp/src/api/chat_handler.cpp`、`gateway-cpp/src/common/logger.cpp`、`agent-py/app/api.py`
+
+### [2026-04-13] 模块：timeout-retry-policy（TODO 2.3）
+
+- 现象：联调超时重试时，容易误把“响应慢”当作“未重试”，或者把“最终成功”当成“未触发超时”；另外若只看最终 HTTP 状态，难确认是否发生了重试与重试次数。
+- 根因：缺少可观测证据闭环。仅靠一次 curl 看不到中间尝试；mock 行为如果不区分“首次超时、再次成功”与“持续超时”，无法验证“最多 1 次重试”是否真正生效。
+- 解决方案：在 Gateway 与 Agent 日志统一输出 `retry_count`；新增 `verify_2_3.sh` 固化四段场景（Gateway 超时重试成功/失败、LLM 超时重试成功/失败），并通过 mock `/stats` 显示调用次数，直接验证“重试 1 次且不无限重试”。
+- 防复发措施：后续修改超时或重试策略时，必须执行 `bash scripts/verify_week2_3.sh`，同时核对 3 个证据：最终状态码、`retry_count`、mock 调用计数（应为 2 而非无限增长）。
+- 验证方式：
+  - 正常路径：`2.3-1` 与 `2.3-3` 返回 200，且 stats 中对应消息调用计数为 2（首次超时 + 一次重试成功）。
+  - 异常路径：`2.3-2` 与 `2.3-4` 返回 504，stats 中对应消息调用计数仍为 2，证明未无限重试。
+- 关联文件：`gateway-cpp/src/api/chat_handler.cpp`、`agent-py/app/llm_client.py`、`gateway-cpp/scripts/verify_2_3.sh`
+
+### [2026-04-13] 模块：gateway-cpp/rate-limit-token-bucket（TODO 2.2）
+
+- 现象：限流联调初期看起来“偶发不触发 429”，同一批请求在不同机器上结果波动大，容易误判为令牌桶实现有 bug。
+- 根因：测试方式不稳定。若只改很小的 `capacity` 但保留较高 `refill_per_sec`，请求间隔和机器调度会不断补充令牌，导致 429 命中率抖动；另外未固定同一批 burst 请求规模，难以横向比较参数效果。
+- 解决方案：把验收脚本固定为两组可重复参数：严格组 `capacity=2, refill_per_sec=0`（稳定触发 429），宽松组 `capacity=10, refill_per_sec=100`（显著减少 429）；统一用 6 次连续 POST 比较 `200/429` 统计，并输出网关日志命中行（`tool_used=rate_limited`）。
+- 防复发措施：后续限流回归统一执行 `bash scripts/verify_week2_2.sh`，不再依赖人工手点请求；若改限流算法，必须保留“严格组触发 + 宽松组对照”两段验证。
+- 验证方式：
+  - 正常路径：宽松参数下 6 次请求应多数/全部 200。
+  - 异常路径：严格参数下 6 次请求应稳定出现 429，且日志中有 `status_code=429`、`tool_used=rate_limited`。
+- 关联文件：`gateway-cpp/src/limiter/token_bucket.cpp`、`gateway-cpp/src/net/http_server.cpp`、`gateway-cpp/scripts/verify_2_2.sh`
+
+### [2026-04-13] 模块：gateway-cpp/sse-e2e（TODO 2.1）
+
+- 现象：2.1 联调时出现三类误判：① `curl -N /chat` 输出里混入 `96`、`0` 等十六进制长度行；② 首包超时场景里 Agent 日志显示 200，但 Gateway 对客户端返回 504；③ 总超时中断与非流式回归在默认配置下不易稳定复现。
+- 根因：① Gateway 初版按字节直透 Agent 响应体，未剥离 `Transfer-Encoding: chunked`；② 流式接口会先返回 HTTP 200 建立流，后续错误通过 SSE `event:error` 或网关超时映射体现，导致“Agent 200 / Gateway 504”并存；③ `sse.total_timeout_ms=120000` 默认过大，且测试脚本未固定“首包先到、第二包延迟”的输入模式，触发条件不稳定。
+- 解决方案：在 `agent_client.cpp` 增加 chunked 解码器，先解出真实 SSE payload 再透传；统一 mock/验证脚本为真实换行 `\n\n`；补充 `verify_2_1.sh` 一键脚本，固化四段场景（正常流式、首包超时 504、总超时中断、非流式回归），并分别使用独立端口和超时参数确保可复现。
+- 防复发措施：后续所有 SSE 验收统一执行 `bash scripts/verify_week2_1.sh`，并同时核对三项证据：客户端输出无 chunk 长度行、日志包含 `ttft_ms`、四段用例结果与预期一致（含首包 504 与总超时 `event:error`）。
+- 验证方式：
+  - 正常路径：`bash scripts/verify_week2_1.sh` 的 `2.1-1` 段可连续看到 `event: delta`，最后 `event: done`；`2.1-4` 段返回标准非流式 JSON。
+  - 异常路径：同一脚本 `2.1-2` 段返回 HTTP 504（`detail=first_chunk_timeout`）；`2.1-3` 段先 `delta` 后 `event:error`（`stream_total_timeout`）。
+- 关联文件：`gateway-cpp/src/upstream/agent_client.cpp`、`gateway-cpp/src/api/chat_handler.cpp`、`agent-py/app/api.py`、`gateway-cpp/scripts/verify_2_1.sh`、`scripts/verify_week2_1.sh`
+
 ### [2026-04-11] 模块：repo/README-week1（TODO 1.5）
 
 - 现象：Week 1 验收时，从仓库根目录直接执行 `./build/cyrus-gateway` 或复制 README 片段却找不到可执行文件 / 读不到 `configs/gateway.yaml`；或运行 `verify_week1.sh` 时终端长时间不返回。

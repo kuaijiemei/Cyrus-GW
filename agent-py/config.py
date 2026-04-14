@@ -13,6 +13,7 @@ class AgentSettings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = Field(default="gpt-4o-mini")
     llm_timeout_ms: int = Field(default=10_000)
+    llm_retry_max: int = Field(default=1)
     agent_tool_enable_list: str = Field(default="time_tool,echo_tool")
     agent_memory_max_turns: int = Field(default=8)
 

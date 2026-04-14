@@ -372,6 +372,110 @@ bash gateway-cpp/scripts/verify_1_4.sh
 
 Week 1 各子模块复盘见根目录 `TIL.md`（1.1–1.4 已各至少一条）。
 
+### 7.5 Week 2 SSE 端到端验证（TODO 2.1，可视化）
+
+仓库根目录一键脚本（自动拉起 Mock LLM、Agent、Gateway，依次打印：正常流式 / 首包超时 / 总超时中断 / 非流式回归）：
+
+```bash
+bash scripts/verify_week2_1.sh
+```
+
+等价于：
+
+```bash
+bash gateway-cpp/scripts/verify_2_1.sh
+```
+
+脚本输出说明：
+
+- `2.1-1`：期望看到 `event: delta`（多次）+ `event: done`
+- `2.1-2`：期望返回 `HTTP 504`，`detail` 为 `first_chunk_timeout`
+- `2.1-3`：期望看到首段 `delta` 后出现 `event: error`（`stream_total_timeout`）
+- `2.1-4`：期望返回标准非流式 JSON（用于回归验证）
+
+脚本会在 `/tmp/gateway_week2_1_*.log` 输出网关日志，包含 `ttft_ms`。
+
+### 7.6 Week 2 限流验证（TODO 2.2，可视化）
+
+仓库根目录一键脚本（自动拉起 Mock LLM、Agent、Gateway，依次打印：严格限流触发 429 / 调整参数后通过率提升 / 限流命中日志）：
+
+```bash
+bash scripts/verify_week2_2.sh
+```
+
+等价于：
+
+```bash
+bash gateway-cpp/scripts/verify_2_2.sh
+```
+
+脚本输出说明：
+
+- `2.2-1`：严格参数（`capacity=2, refill_per_sec=0`）下稳定触发 `429`
+- `2.2-2`：宽松参数（`capacity=10, refill_per_sec=100`）下同批请求 `429` 显著减少
+- `2.2-3`：网关日志可见 `status_code=429` 且 `tool_used=rate_limited`
+
+### 7.7 Week 2 超时与重试验证（TODO 2.3，可视化）
+
+仓库根目录一键脚本（自动拉起 mock Agent / mock LLM / Agent / Gateway，依次打印：Gateway 超时重试成功、Gateway 超时重试失败、LLM 超时重试成功、LLM 超时重试失败）：
+
+```bash
+bash scripts/verify_week2_3.sh
+```
+
+等价于：
+
+```bash
+bash gateway-cpp/scripts/verify_2_3.sh
+```
+
+脚本输出说明：
+
+- `2.3-1`：Gateway -> Agent 首次超时，重试 1 次成功（最终 200）
+- `2.3-2`：Gateway -> Agent 连续超时，最多重试 1 次后返回 504
+- `2.3-3`：Agent -> LLM 首次超时，重试 1 次成功（最终 200）
+- `2.3-4`：Agent -> LLM 连续超时，最多重试 1 次后返回 504
+
+日志应可观察 `retry_count`，并可通过 mock stats 看到调用次数为 2（无无限重试）。
+
+### 7.8 Week 2 错误处理与状态码统一验证（TODO 2.4，可视化）
+
+仓库根目录一键脚本（自动拉起 mock Agent / mock LLM / Agent / Gateway，依次打印：400、429、502、504 典型错误场景，并输出网关/Agent 错误层级日志）：
+
+```bash
+bash scripts/verify_week2_4.sh
+```
+
+等价于：
+
+```bash
+bash gateway-cpp/scripts/verify_2_4.sh
+```
+
+脚本输出说明：
+
+- `2.4-1`：`400`（非法 JSON），错误体含 `request_id` 与 `error_layer=gateway`
+- `2.4-2`：`429`（限流），错误体含 `request_id` 与 `error_layer=gateway`
+- `2.4-3`：`502`（Agent 不可用），错误体含 `request_id` 与 `error_layer=agent`
+- `2.4-4`：`504`（上游超时），错误体含 `request_id` 与 `error_layer=agent`
+- `2.4-5`：日志可见失败层级字段：Gateway 侧 `gateway/agent`，Agent 侧 `llm`
+
+### 7.9 Week 2 里程碑总验证（TODO 2.5）
+
+仓库根目录一键脚本（串行执行 2.1~2.4，完整演示：SSE、限流、超时重试、错误统一）：
+
+```bash
+bash scripts/verify_week2_5.sh
+```
+
+等价于：
+
+```bash
+bash gateway-cpp/scripts/verify_2_5.sh
+```
+
+该脚本适合里程碑汇报或面试演示，输出末尾会打印 `done: Week 2 milestone verify finished`。
+
 ---
 
 ## 8. 配置建议

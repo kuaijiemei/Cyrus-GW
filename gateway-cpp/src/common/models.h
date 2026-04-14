@@ -12,6 +12,10 @@ struct GatewayConfigSnapshot {
     std::string agent_base_url;
     std::int32_t agent_timeout_ms{8000};
     std::int32_t agent_retry_max{1};
+    std::int32_t rate_limit_capacity{500};
+    std::int32_t rate_limit_refill_per_sec{200};
+    std::int32_t sse_first_chunk_timeout_ms{5000};
+    std::int32_t sse_total_timeout_ms{120000};
 };
 
 }  // namespace cyrus

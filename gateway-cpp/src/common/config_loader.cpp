@@ -2,7 +2,6 @@
 
 #include <fstream>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -133,6 +132,18 @@ std::optional<GatewayConfigSnapshot> load_gateway_config(const std::filesystem::
     }
     if (auto it = kv.find("agent_retry_max"); it != kv.end()) {
         c.agent_retry_max = parse_i32(it->second, 1);
+    }
+    if (auto it = kv.find("rate_limit.capacity"); it != kv.end()) {
+        c.rate_limit_capacity = parse_i32(it->second, 500);
+    }
+    if (auto it = kv.find("rate_limit.refill_per_sec"); it != kv.end()) {
+        c.rate_limit_refill_per_sec = parse_i32(it->second, 200);
+    }
+    if (auto it = kv.find("sse.first_chunk_timeout_ms"); it != kv.end()) {
+        c.sse_first_chunk_timeout_ms = parse_i32(it->second, 5000);
+    }
+    if (auto it = kv.find("sse.total_timeout_ms"); it != kv.end()) {
+        c.sse_total_timeout_ms = parse_i32(it->second, 120000);
     }
     return c;
 }

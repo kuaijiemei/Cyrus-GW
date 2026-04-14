@@ -11,6 +11,7 @@ inline constexpr char kPath[] = "path";
 inline constexpr char kQueueWaitMs[] = "queue_wait_ms";
 inline constexpr char kLlmCallLatencyMs[] = "llm_call_latency_ms";
 inline constexpr char kStream[] = "stream";
+inline constexpr char kTtftMs[] = "ttft_ms";
 inline constexpr char kRetryCount[] = "retry_count";
 inline constexpr char kClientIp[] = "client_ip";
 inline constexpr char kErrorCode[] = "error_code";
