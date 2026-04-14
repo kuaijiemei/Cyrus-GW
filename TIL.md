@@ -40,6 +40,50 @@
 
 ## 3) 问题清单（按时间倒序追加）
 
+### [2026-04-14] 模块：week3-milestone-verify（TODO 3.5）
+
+- 现象：手工按顺序分别跑 `verify_week3_1.sh`、`verify_week3_2.sh`、`verify_week3_3.sh` 时，演示或回归容易漏跑其中一段，或中途失败后误以为「后面两段已通过」；对外统一说「Week3 过了」但缺少单一入口证据。
+- 根因：Week3 验收分散在三个脚本，缺少与 Week2.5 同级的「总编排入口」；`bash scripts/verify_week3_1.sh` 这类相对路径在 cwd 不在仓库根时也会直接报「找不到文件」。
+- 解决方案：新增 `scripts/verify_week3_5.sh`，用 `ROOT="$(cd .../.. && pwd)"` 固定仓库根，再以绝对路径串行 `bash "${ROOT}/scripts/verify_week3_{1,2,3}.sh"`；任一段非 0 即整里程碑失败（`set -e`），末尾打印统一 DONE 标记。
+- 防复发措施：对外演示与 CI 回归 Week3 统一只跑 `bash scripts/verify_week3_5.sh`；子脚本改动后仍应可单独跑单段排障。
+- 验证方式：
+  - 正常路径：在仓库根执行 `bash scripts/verify_week3_5.sh`，应依次看到 3.1/3.2/3.3 段标题与各自 PASS 汇总，最后出现 `DONE: Week 3.5 milestone verify finished`。
+  - 异常路径：故意破坏某段依赖（如停掉 venv），总脚本应在对应子段立即非 0 退出，便于定位是 3.1/3.2/3.3 哪一层。
+- 关联文件：`scripts/verify_week3_5.sh`、`scripts/verify_week3_1.sh`、`scripts/verify_week3_2.sh`、`scripts/verify_week3_3.sh`
+
+### [2026-04-14] 模块：tool-llm-feedback-loop-verify（TODO 3.3）
+
+- 现象：`verify_week3_3.sh` 初版只校验了 HTTP 响应里的 `tool_used`，看起来“功能通过”，但无法证明“Agent 确实做了两次 LLM 调用（先决策、再最终回答）”，演示时仍会被追问“是不是只做了一次调用”。
+- 根因：仅看最终响应缺少中间证据；`tool_used` 只能证明“工具被用过”，不能证明“tool 结果已经回填到最终 prompt 并触发二次 LLM 组织答案”。
+- 解决方案：在 Mock LLM 侧增加 trace 记录（`decision` / `final_answer` 两阶段 JSONL），脚本验收时打印 `SHOW_DECISION_JSON` 与 `SHOW_FINAL_CONTEXT`，并断言最终上下文包含 `Tool 'time_tool' returned:`。
+- 防复发措施：后续涉及“多阶段编排”的验收脚本，必须同时提供“结果断言 + 中间过程证据断言”；避免只看最终 HTTP 字段导致误判。
+- 验证方式：
+  - 正常路径：`bash scripts/verify_week3_3.sh` 输出 `TRACE_DECISION=2`、`TRACE_FINAL=2`，且 `SHOW_FINAL_CONTEXT` 含工具返回内容。
+  - 异常路径：`force-bad-tool` 请求下 `tool_used=""` 且 Agent 进程存活，说明工具失败已降级、不崩溃。
+- 关联文件：`scripts/verify_week3_3.sh`、`agent-py/app/agent_core.py`
+
+### [2026-04-14] 模块：tool-framework-verify（TODO 3.2）
+
+- 现象：`verify_week3_2.sh` 第一版在“HTTP 请求验收”阶段连续 3 个断言失败，但响应里实际上已经包含 `tool_used` 预期值；终端同时出现 `/scripts/verify_week3_2.sh: 行XXX: rg：未找到命令`。
+- 根因：脚本断言依赖 `rg`，而当前 RHEL 环境下运行脚本时 PATH 不含 `rg`，导致命令不存在并触发 `if` 分支误判；这是脚本工具依赖问题，不是 Tool 框架逻辑问题。
+- 解决方案：将断言从 `echo "$resp" | rg ...` 改为纯 Bash 子串匹配 `[[ "$resp" == *'"tool_used":"time_tool"'* ]]`，彻底移除对外部搜索工具的依赖。
+- 防复发措施：验收脚本默认只依赖 bash/curl/python3 等基础命令；新增脚本前先检查“无额外工具依赖”原则，避免在最小环境中误报失败。
+- 验证方式：
+  - 正常路径：`bash scripts/verify_week3_2.sh` 输出 `PASS=7 FAIL=0`，并显示 `DONE Week 3.2 verify passed`。
+  - 异常路径：Mock LLM 返回错误 tool 参数或未知 tool 时，响应仍为 200 且 `tool_used=""`，同时 Agent 进程持续存活。
+- 关联文件：`scripts/verify_week3_2.sh`、`agent-py/app/tool_router.py`、`agent-py/app/tools/contracts.py`
+
+### [2026-04-14] 模块：agent-py/decision-mechanism（TODO 3.1）
+
+- 现象：验收脚本第一版 `check()` 函数使用 `grep -qF '"tool_used": "time_tool"'`（冒号后有空格），但 FastAPI 返回的是紧凑 JSON（`"tool_used":"time_tool"`，无空格），导致所有断言误报 FAIL，实际逻辑已正确。
+- 根因：FastAPI 默认使用紧凑序列化（`separators=(',', ':')` 风格），而脚本 `check()` 中的期望字符串按 Python `json.dumps` 默认格式（含空格）书写，两者不一致，`grep -qF` 严格字符串匹配无法命中。
+- 解决方案：在 `check()` 函数中增加二次匹配：`compact_expected="$(echo "${expected}" | sed 's/": /":/')"` 再 grep，同时兼容 pretty-print 与紧凑格式。
+- 防复发措施：验收脚本中所有 JSON 字段断言统一用双格式兼容模式；或改用 `python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"` 精确断言字段值，彻底避免格式依赖。
+- 验证方式：
+  - 正常路径：`bash scripts/verify_week3_1.sh` 输出 12/12 PASS，三个分支（规则/LLM辅助/兜底）均覆盖。
+  - 异常路径：Mock LLM 返回无效 JSON 时，`tool_used=""` 且请求正常返回 200（不崩溃）。
+- 关联文件：`agent-py/app/agent_core.py`、`agent-py/app/schemas.py`、`agent-py/app/tool_router.py`、`scripts/verify_week3_1.sh`
+
 ### [2026-04-13] 模块：week2-milestone-verify（TODO 2.5）
 
 - 现象：单独运行 2.1/2.2/2.3/2.4 都通过，但里程碑演示时经常漏步骤或顺序混乱，导致“功能都做了却难一次讲清”；手工切换脚本还会出现“上一段残留进程未清理”引发端口占用误报。
