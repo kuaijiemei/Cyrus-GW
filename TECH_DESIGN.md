@@ -107,15 +107,16 @@ LLM / Tools
 
 ### 功能
 
-- 请求排队
 - 限流（Token Bucket）
 - 超时控制
+- 统一错误映射与重试边界
 
-### 实现建议（MVP）
+### 当前交付状态（v1.0.0）
 
-- 内存队列（线程池队列或协程队列）
 - 单机内存限流计数
-- Redis 可选，不作为强依赖
+- Gateway 运行时直接走三种网络 I/O 模式之一：`blocking` / `epoll` / `io_uring`
+- `scheduler/` 目录当前仍是占位实现，未接入独立请求队列
+- Redis 仍为后续增强项，不作为当前版本依赖
 
 ## 4.3 Python Agent Service（AI 核心）
 
@@ -148,7 +149,7 @@ LLM / Tools
 
 ---
 
-## 5. 项目结构（两服务目录）
+## 5. 项目结构（实际仓库）
 
 ```text
 Cyrus-GW/
@@ -158,39 +159,92 @@ Cyrus-GW/
   │   │   └─ gateway.yaml
   │   └─ src/
   │       ├─ main.cpp
-  │       ├─ net/
-  │       │   ├─ http_server.cpp
-  │       │   └─ event_loop.cpp
   │       ├─ api/
-  │       │   └─ chat_handler.cpp
+  │       │   ├─ chat_handler.cpp
+  │       │   └─ chat_handler.h
+  │       ├─ common/
+  │       │   ├─ config.h
+  │       │   ├─ config_loader.cpp
+  │       │   ├─ coroutine_compat.h
+  │       │   ├─ errors.h
+  │       │   ├─ json_util.h
+  │       │   ├─ log_fields.h
+  │       │   ├─ logger.cpp
+  │       │   ├─ logger.h
+  │       │   └─ models.h
+  │       ├─ limiter/
+  │       │   ├─ token_bucket.cpp
+  │       │   └─ token_bucket.h
+  │       ├─ net/
+  │       │   ├─ epoll_server.cpp
+  │       │   ├─ epoll_server.h
+  │       │   ├─ event_loop.cpp
+  │       │   ├─ http_common.h
+  │       │   ├─ http_server.cpp
+  │       │   ├─ http_server.h
+  │       │   ├─ iouring_server.cpp
+  │       │   ├─ iouring_server.h
+  │       │   └─ uring_compat.h
   │       ├─ scheduler/
   │       │   ├─ task_queue.cpp
   │       │   └─ worker_pool.cpp
-  │       ├─ limiter/
-  │       │   └─ token_bucket.cpp
   │       ├─ upstream/
-  │       │   └─ agent_client.cpp
-  │       └─ common/
-  │           ├─ models.h
-  │           ├─ errors.h
-  │           └─ logger.cpp
+  │       │   ├─ agent_client.cpp
+  │       │   └─ agent_client.h
+  │   └─ scripts/
+  │       ├─ verify_1_2.sh
+  │       ├─ verify_1_4.sh
+  │       ├─ verify_2_1.sh
+  │       ├─ verify_2_2.sh
+  │       ├─ verify_2_3.sh
+  │       ├─ verify_2_4.sh
+  │       └─ verify_2_5.sh
   ├─ agent-py/
+  │   ├─ config.py
   │   ├─ requirements.txt
   │   ├─ app/
+  │   │   ├─ __init__.py
+  │   │   ├─ agent_core.py
   │   │   ├─ main.py
   │   │   ├─ api.py
-  │   │   ├─ schemas.py
-  │   │   ├─ agent_core.py
+  │   │   ├─ errors.py
   │   │   ├─ llm_client.py
+  │   │   ├─ log_fields.py
+  │   │   ├─ schemas.py
   │   │   ├─ tool_router.py
   │   │   └─ tools/
+  │   │       ├─ __init__.py
+  │   │       ├─ contracts.py
   │   │       ├─ time_tool.py
   │   │       └─ echo_tool.py
-  │   └─ config.py
-  └─ docs/
-      ├─ PRD.md
-      ├─ RESEARCH.md
-      └─ TECH_DESIGN.md
+  │   └─ scripts/
+  │       └─ verify_1_3.sh
+  ├─ scripts/
+  │   ├─ bench_week4_2.sh
+  │   ├─ stream_ttft_bench.py
+  │   ├─ verify_week1.sh
+  │   ├─ verify_week2_1.sh
+  │   ├─ verify_week2_2.sh
+  │   ├─ verify_week2_3.sh
+  │   ├─ verify_week2_4.sh
+  │   ├─ verify_week2_5.sh
+  │   ├─ verify_week3_1.sh
+  │   ├─ verify_week3_2.sh
+  │   ├─ verify_week3_3.sh
+  │   ├─ verify_week3_5.sh
+  │   ├─ verify_week4_1.sh
+  │   ├─ verify_week4_2.sh
+  │   ├─ verify_week4_4.sh
+  │   └─ wrk_chat_non_stream.lua
+  ├─ PRD.md
+  ├─ RESEARCH.md
+  ├─ TECH_DESIGN.md
+  ├─ README.md
+  ├─ AGENTS.md
+  ├─ BENCHMARK_RESULTS.md
+  ├─ DEMO_SCRIPT.md
+  ├─ TIL.md
+  └─ TODO.md
 ```
 
 ---
@@ -211,7 +265,7 @@ Cyrus-GW/
 
 - `message`：用户输入（必填）
 - `stream`：是否流式返回（可选）
-- `session_id`：简单 memory 用（可选）
+- `session_id`：预留给未来 memory 扩展；`v1.0.0` 仅透传
 
 ## 6.2 Gateway -> Agent 请求模型
 
@@ -248,7 +302,8 @@ Cyrus-GW/
   "request_id": "req_xxx",
   "answer": "现在是 21:30",
   "tool_used": "time_tool",
-  "model": "gpt-4o-mini"
+  "model": "gpt-4o-mini",
+  "retry_count": 0
 }
 ```
 
@@ -274,9 +329,9 @@ Cyrus-GW/
 
 ## 7.3 调度与排队
 
-- 入站请求先入队，再由 worker 拉取处理
-- 队列长度与等待时长可观测
-- 超时请求主动取消，避免积压
+- 当前交付版没有单独请求队列；连接直接在所选 I/O 模式中处理
+- `scheduler/task_queue.cpp` 与 `scheduler/worker_pool.cpp` 仍为占位文件，保留后续扩展点
+- `queue_wait_ms` 尚未落地，不能作为当前版本的可观测指标承诺
 
 ## 7.4 Token Bucket 限流
 
@@ -318,7 +373,7 @@ Cyrus-GW/
 ## 8.1 普通对话
 
 1. Client 调用 Gateway `/chat`
-2. Gateway 校验参数、限流、入队
+2. Gateway 校验参数、限流、进入当前 I/O 模式处理路径
 3. Gateway 转发到 Agent
 4. Agent 直接调用 LLM 得到答案
 5. Agent 返回结果给 Gateway
@@ -357,12 +412,20 @@ Cyrus-GW/
 - `request_id`
 - `path`
 - `latency_ms`
-- `queue_wait_ms`
-- `llm_call_latency_ms`
 - `stream`
 - `tool_used`
 - `status_code`
-- 可选增强：`retry_count`
+- `retry_count`
+
+条件字段：
+
+- `ttft_ms`（仅流式成功路径）
+- `error_layer`（错误路径）
+
+预留未落地：
+
+- `queue_wait_ms`
+- `llm_call_latency_ms`
 
 ## 10.2 性能验收建议
 

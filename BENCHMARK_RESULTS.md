@@ -166,7 +166,7 @@
 
 2. **非流式延迟：io_uring 全档位 P50/P99 均优于 epoll。** C=100 P50 为 2.24s vs 2.27s，C=300 P50 为 7.47s vs 7.60s。差距不大但方向一致——io_uring 的 SQE/CQE 批量提交减少了每次 I/O 的系统调用开销。
 
-3. **流式 TTFT：两种模式表现接近，epoll 在低并发略优。** C=100 时 epoll 的 TTFT avg 比 io_uring 低约 15%（1,691ms vs 1,982ms）；C=300/500 两者差距 < 1-2%。全部档位均 **100% 成功、0 超时**。TTFT 的主要瓶颈在 Agent 端（uvicorn 单 worker 串行处理），Gateway 层的模式差异被 Agent 延迟掩盖。
+3. **流式 TTFT：两种模式表现接近，epoll 在低并发略优。** C=100 时 epoll 的 TTFT avg 比 io_uring 低约 15%（1,691ms vs 1,982ms）；C=300/500 两者差距 < 1-2%。全部档位均 **100% 成功、0 超时**。TTFT 的主要瓶颈在 Agent 端（uvicorn 单 worker + Python 事件循环 / GIL），Gateway 层的模式差异被 Agent 延迟掩盖。
 
 4. **系统瓶颈在 Agent 侧。** 非流式 C=100 RPS 为 37，而 Gateway 纯错误响应场景可达 6000+ RPS。说明 >99% 的时间花在 Agent/Mock LLM 链路上。在真实生产环境（多 worker Agent + 真实 LLM），Gateway 模式差异会进一步放大。
 
@@ -186,7 +186,7 @@
 ### 5.3 数据局限性说明
 
 1. Mock LLM 使用 Python `ThreadingHTTPServer`，其并发处理能力远低于真实 LLM API。非流式 RPS 上限由 Agent 决定（~37 RPS），Gateway 差异被放大的前提是 Agent 饱和。
-2. 流式 TTFT 受 Agent 单 worker 串行处理限制，Gateway 层的模式差异在 TTFT 上表现不明显。生产环境下多 worker + 真实 LLM 推理延迟时差异会更显著。
+2. 流式 TTFT 受 Agent 单 worker 限制，Gateway 层的模式差异在 TTFT 上表现不明显。生产环境下多 worker + 真实 LLM 推理延迟时差异会更显著。
 3. 测试采用顺序执行（非流式全部跑完再跑流式），预热轮与正式轮的数据差异可作为系统冷启动特征参考。
 4. VM 环境（VMware）与裸机性能有差距，io_uring 在裸机上的 batching 优势可能更明显。
 

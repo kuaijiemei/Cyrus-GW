@@ -8,43 +8,38 @@
 
 ## 1. 架构图（双服务）
 
-```text
-┌──────────────────────────────────────────────────────────────────┐
-│                         Client（curl / 浏览器）                   │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │  HTTP POST /chat
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    C++ Gateway Service (:8080)                    │
-│                                                                  │
-│  ┌─────────┐  ┌──────────────┐  ┌────────────┐  ┌───────────┐  │
-│  │ HTTP    │→ │ Rate Limiter │→ │ Scheduler  │→ │ Upstream  │  │
-│  │ Server  │  │ (TokenBucket)│  │ (Coroutine │  │ Agent     │  │
-│  │         │  │              │  │  / Thread)  │  │ Client    │  │
-│  └─────────┘  └──────────────┘  └────────────┘  └─────┬─────┘  │
-│   非阻塞I/O     429 超限返回      io_uring/epoll        │        │
-│   C++20协程     可配置参数        双模对比               │        │
-└──────────────────────────────────────────────────────────┼────────┘
-                                                           │ HTTP+JSON
-                                                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                   Python Agent Service (:8001)                    │
-│                                                                  │
-│  ┌──────────┐   ┌────────────┐   ┌───────────┐   ┌──────────┐  │
-│  │ FastAPI  │ → │ Agent Core │ → │ Tool      │ → │ LLM      │  │
-│  │ /agent/  │   │ (决策引擎)  │   │ Router    │   │ Client   │  │
-│  │  chat    │   │            │   │           │   │          │  │
-│  └──────────┘   └────────────┘   └─────┬─────┘   └────┬─────┘  │
-│   Pydantic       规则优先+LLM辅助       │              │        │
-│   类型化          结构化action          │              │        │
-└─────────────────────────────────────────┼──────────────┼────────┘
-                                          │              │
-                                          ▼              ▼
-                                   ┌───────────┐  ┌───────────┐
-                                   │ time_tool │  │ LLM API   │
-                                   │ echo_tool │  │ (OpenAI / │
-                                   │ ...       │  │  DeepSeek) │
-                                   └───────────┘  └───────────┘
+```mermaid
+flowchart TD
+    Client(["🖥 Client\ncurl / 浏览器"])
+
+    subgraph GW["⚙ C++ Gateway Service  :8080"]
+        direction LR
+        HTTP["HTTP Server\n入口与协议处理"]
+        RL["Rate Limiter\nToken Bucket · 429 超限"]
+        SC["Net Runtime\nblocking / epoll / io_uring"]
+        UC["Upstream Client\n超时 · 重试 · 错误映射"]
+        HTTP --> RL --> SC --> UC
+    end
+
+    subgraph AG["🐍 Python Agent Service  :8001"]
+        direction LR
+        FA["FastAPI\n/agent/chat · Pydantic"]
+        AC["Agent Core\n规则优先 + LLM 辅助决策"]
+        TR["Tool Router\ntool_name 分发"]
+        LC["LLM Client\n超时 · 1次重试"]
+        FA --> AC
+        AC --> TR
+        AC --> LC
+    end
+
+    Tools["🔧 Tools\ntime_tool · echo_tool"]
+    LLM["☁ LLM API\nOpenAI / DeepSeek"]
+
+    Client -->|"POST /chat\nmessage · stream · session_id"| HTTP
+    UC -->|"HTTP + JSON\nrequest_id 透传"| FA
+    TR --> Tools
+    LC --> LLM
+
 ```
 
 **一句话定位**（背熟）：
@@ -59,75 +54,76 @@
 
 ### 2.1 普通对话（直接回答）
 
-```text
-Client          Gateway              Agent               LLM
-  │                │                    │                   │
-  │─ POST /chat ──→│                    │                   │
-  │                │─ 限流检查 ─────────→│                   │
-  │                │                    │                   │
-  │                │─ HTTP POST ───────→│                   │
-  │                │  /agent/chat       │                   │
-  │                │                    │─ 规则判断 ────────→│
-  │                │                    │  action=direct    │
-  │                │                    │                   │
-  │                │                    │─ LLM 调用 ───────→│
-  │                │                    │                   │
-  │                │                    │←── 回答 ──────────│
-  │                │←── JSON 响应 ──────│                   │
-  │←── 200 JSON ───│                    │                   │
-  │                │                    │                   │
-  │  端到端日志：request_id / latency_ms / status_code      │
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant G as Gateway :8080
+    participant A as Agent :8001
+    participant L as LLM API
+
+    C->>G: POST /chat
+    Note right of G: 参数校验 · 限流检查<br/>生成 request_id
+    G->>A: POST /agent/chat<br/>{request_id, message, stream}
+    Note right of A: 规则判断<br/>action = direct_answer
+    A->>L: LLM 调用
+    L-->>A: 完整回答
+    A-->>G: {request_id, answer, tool_used: ""}
+    G-->>C: 200 JSON
+
+    Note over C,L: 全链路日志：request_id · latency_ms · status_code · tool_used
 ```
 
 ### 2.2 工具调用对话（tool_call → LLM 回填）
 
-```text
-Client          Gateway              Agent               Tool        LLM
-  │                │                    │                   │           │
-  │─ POST /chat ──→│                    │                   │           │
-  │  "现在几点"     │                    │                   │           │
-  │                │─ HTTP POST ───────→│                   │           │
-  │                │                    │                   │           │
-  │                │                    │─ 规则/LLM 判断 ──→│           │
-  │                │                    │  action=tool_call │           │
-  │                │                    │  tool=time_tool   │           │
-  │                │                    │                   │           │
-  │                │                    │─ 执行 time_tool ─→│           │
-  │                │                    │                   │           │
-  │                │                    │←─ "2026-04-14..." │           │
-  │                │                    │                   │           │
-  │                │                    │─ tool结果+原问题 ────────────→│
-  │                │                    │  拼入 LLM 上下文   │           │
-  │                │                    │                   │           │
-  │                │                    │←──── 最终回答 ────────────────│
-  │                │                    │                   │           │
-  │                │←── JSON 响应 ──────│                   │           │
-  │                │    tool_used:      │                   │           │
-  │                │    "time_tool"     │                   │           │
-  │←── 200 JSON ───│                    │                   │           │
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant G as Gateway :8080
+    participant A as Agent :8001
+    participant T as Tool
+    participant L as LLM API
+
+    C->>G: POST /chat "现在几点"
+    G->>A: POST /agent/chat<br/>{request_id, message}
+    Note right of A: 规则优先命中<br/>action = tool_call<br/>tool = time_tool
+    A->>T: 执行 time_tool{}
+    T-->>A: "2026-04-14 21:30"
+    Note right of A: tool 结果 + 原问题<br/>拼入 messages 上下文
+    A->>L: LLM 调用（含 tool 结果）
+    L-->>A: 最终自然语言回答
+    A-->>G: {answer, tool_used: "time_tool"}
+    G-->>C: 200 JSON
 ```
 
 ### 2.3 流式 SSE 对话
 
-```text
-Client          Gateway              Agent               LLM
-  │                │                    │                   │
-  │─ POST /chat ──→│                    │                   │
-  │  stream=true   │                    │                   │
-  │                │─ HTTP POST ───────→│                   │
-  │                │  stream=true       │─ LLM stream ────→│
-  │                │                    │                   │
-  │                │                    │←─ chunk 1 ───────│
-  │                │←─ SSE delta ───────│                   │
-  │←─ event:delta─→│                    │                   │
-  │                │                    │←─ chunk 2 ───────│
-  │                │←─ SSE delta ───────│                   │
-  │←─ event:delta─→│                    │                   │
-  │                │                    │←─ [DONE] ────────│
-  │                │←─ SSE done ────────│                   │
-  │←─ event:done ─→│                    │                   │
-  │                │                    │                   │
-  │  关键指标：TTFT (首包延迟) = delta_1.timestamp - request.timestamp
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant G as Gateway :8080
+    participant A as Agent :8001
+    participant L as LLM API
+
+    C->>G: POST /chat {stream: true}
+    G->>A: POST /agent/chat<br/>{stream: true}
+    A->>L: LLM stream 调用
+
+    L-->>A: chunk 1
+    A-->>G: SSE delta
+    G-->>C: event:delta
+
+    L-->>A: chunk 2
+    A-->>G: SSE delta
+    G-->>C: event:delta
+
+    L-->>A: [DONE]
+    A-->>G: SSE done
+    G-->>C: event:done
+
+    Note over C,G: TTFT = 首个 delta.timestamp − request.timestamp<br/>慢客户端背压：下游阻塞时暂停上游读取
 ```
 
 ---
@@ -160,7 +156,8 @@ curl -sS -w '\n' -X POST http://127.0.0.1:8080/chat \
 
 **讲解要点**：
 
-- 指出响应中的 `request_id`（链路追踪）、`latency_ms`（端到端延迟）
+- 指出响应中的 `request_id`
+- 指出 Gateway 日志中的 `latency_ms`
 - 指出 Gateway 日志行中的 `status_code`、`tool_used`
 
 ### 第 3 步：流式 SSE 对话（60 秒）
@@ -189,7 +186,8 @@ curl -sS -w '\n' -X POST http://127.0.0.1:8080/chat \
 
 - 响应中 `tool_used: "time_tool"` 证明走了工具路径
 - 解释决策过程：Agent 规则匹配 → 调 time_tool → 结果回填 LLM → 最终回答
-- 这是两次 LLM 调用（决策 + 组织答案），不是一次
+- 这条规则命中的 time_tool 路径是“0 次决策 LLM + 1 次最终回答 LLM”
+- 只有复杂场景未命中规则时，才会变成“LLM 决策 + LLM 最终回答”两次调用
 
 ### 第 5 步：限流演示（30 秒）
 
@@ -325,7 +323,8 @@ wait
 
 > A：有兜底机制。tool 执行异常时捕获错误，Agent 降级为直接回答路径，
 > 不会因为一个 tool 失败导致整个请求崩溃。
-> 响应中 tool_used 为空，日志记录 error_layer=tool。
+> 响应中 `tool_used` 为空，Agent warning 日志会保留 tool 名称、错误码和 detail；
+> 当前 access log 的 `error_layer` 只按 `gateway / agent / llm` 三层归类。
 
 **Q：tool 安全性？比如 shell_tool？**
 

@@ -40,6 +40,17 @@
 
 ## 3) 问题清单（按时间倒序追加）
 
+### [2026-04-18] 模块：release-doc-sync（v1.0.0 发布前）
+
+- 现象：准备发布 `v1.0.0` 时，根文档之间出现多处“说明比实现更超前”的漂移：`README.md` / `TECH_DESIGN.md` 仍把独立调度队列、`queue_wait_ms`、`llm_call_latency_ms` 当作已落地能力；目录树遗漏实际源码文件；`DEMO_SCRIPT.md` 中个别口播把 `latency_ms` 说成响应字段、把 `time_tool` 路径说成“两次 LLM 调用”、把 tool 失败说成 `error_layer=tool`；构建回退命令也没有覆盖全部 `.cpp`。
+- 根因：开发过程中功能、脚本和答辩材料是分阶段分别更新的，但缺少一次“按真实仓库树 + 真实日志字段 + 真实响应模型”的发布前总校对，导致计划态描述、历史草稿和当前实现混在一起。
+- 解决方案：在打 tag 前集中同步 `README.md`、`TECH_DESIGN.md`、`PRD.md`、`DEMO_SCRIPT.md`、`BENCHMARK_RESULTS.md`：统一标记 `session_id/memory` 为预留未落地；把目录树和构建说明改成与当前仓库一致；把日志字段改成实际输出集合（`request_id/path/latency_ms/stream/tool_used/status_code/retry_count`，条件字段 `ttft_ms/error_layer`）；修正 demo 话术与基准结论中的不准确表述。
+- 防复发措施：以后每次准备 release 或答辩前，固定执行一次“文档对码”清单：① 用 `find` 对目录树；② 用 `rg` 对日志字段和错误层级；③ 用 `git diff` 复查 README / TECH_DESIGN / DEMO 三类对外材料；④ 将“预留未落地”与“已交付”显式分栏，避免文档默认读成“都已实现”。
+- 验证方式：
+  - 正常路径：发布前检查文档时，目录树、接口示例、日志样例、demo 口播与当前仓库实现一致，不再出现“文档里有、代码里没有”或“代码有、文档没写”的情况。
+  - 异常路径：若后续新增配置项或日志字段但只改了代码、没改文档，应能通过发布前的 `rg` / `git diff` 总校对被发现。
+- 关联文件：`README.md`、`TECH_DESIGN.md`、`PRD.md`、`DEMO_SCRIPT.md`、`BENCHMARK_RESULTS.md`
+
 ### [2026-04-14] 模块：demo-script-verify（TODO 4.4）
 
 - 现象：`verify_week4_4.sh` 第一版在首条 `check()` 调用后立即退出（exit code 1），只输出 1 条 PASS 就终止，后续 25 条检查全未执行。

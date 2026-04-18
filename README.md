@@ -26,6 +26,23 @@
 - cost 计费
 - 复杂策略引擎
 
+### 1.3 v1.0.0 交付状态
+
+已交付：
+
+- `/chat` 非流式与流式（SSE）主链路
+- Gateway 限流、超时、最多 1 次重试、统一错误映射
+- Agent 规则优先 + LLM 辅助决策，`time_tool` / `echo_tool`
+- `blocking` / `epoll` / `io_uring` 三种 Gateway 网络 I/O 模式
+- 同机压测与 `BENCHMARK_RESULTS.md`
+
+预留但未纳入 `v1.0.0`：
+
+- 基于 `session_id` 的简单 memory
+- Redis 持久化
+- 独立调度队列与 `queue_wait_ms`
+- `llm_call_latency_ms` 细粒度埋点
+
 ---
 
 ## 2. 系统架构
@@ -53,7 +70,7 @@ LLM Provider / Tools
 
 ---
 
-## 3. 目录建议结构
+## 3. 实际目录结构（v1.0.0）
 
 ```text
 Cyrus-GW/
@@ -63,25 +80,89 @@ Cyrus-GW/
   │   │   └─ gateway.yaml
   │   └─ src/
   │       ├─ main.cpp
-  │       ├─ net/
   │       ├─ api/
-  │       ├─ scheduler/
+  │       │   ├─ chat_handler.cpp
+  │       │   └─ chat_handler.h
+  │       ├─ common/
+  │       │   ├─ config.h
+  │       │   ├─ config_loader.cpp
+  │       │   ├─ coroutine_compat.h
+  │       │   ├─ errors.h
+  │       │   ├─ json_util.h
+  │       │   ├─ log_fields.h
+  │       │   ├─ logger.cpp
+  │       │   ├─ logger.h
+  │       │   └─ models.h
   │       ├─ limiter/
-  │       ├─ upstream/
-  │       └─ common/
+  │       │   ├─ token_bucket.cpp
+  │       │   └─ token_bucket.h
+  │       ├─ net/
+  │       │   ├─ epoll_server.cpp
+  │       │   ├─ epoll_server.h
+  │       │   ├─ event_loop.cpp
+  │       │   ├─ http_common.h
+  │       │   ├─ http_server.cpp
+  │       │   ├─ http_server.h
+  │       │   ├─ iouring_server.cpp
+  │       │   ├─ iouring_server.h
+  │       │   └─ uring_compat.h
+  │       ├─ scheduler/
+  │       │   ├─ task_queue.cpp
+  │       │   └─ worker_pool.cpp
+  │       └─ upstream/
+  │           ├─ agent_client.cpp
+  │           └─ agent_client.h
+  │   └─ scripts/
+  │       ├─ verify_1_2.sh
+  │       ├─ verify_1_4.sh
+  │       ├─ verify_2_1.sh
+  │       ├─ verify_2_2.sh
+  │       ├─ verify_2_3.sh
+  │       ├─ verify_2_4.sh
+  │       └─ verify_2_5.sh
   ├─ agent-py/
+  │   ├─ config.py
   │   ├─ requirements.txt
   │   ├─ app/
-  │   │   ├─ main.py
-  │   │   ├─ api.py
-  │   │   ├─ schemas.py
+  │   │   ├─ __init__.py
   │   │   ├─ agent_core.py
+  │   │   ├─ api.py
+  │   │   ├─ errors.py
   │   │   ├─ llm_client.py
+  │   │   ├─ log_fields.py
+  │   │   ├─ main.py
+  │   │   ├─ schemas.py
   │   │   ├─ tool_router.py
   │   │   └─ tools/
-  │   └─ config.py
+  │   │       ├─ __init__.py
+  │   │       ├─ contracts.py
+  │   │       ├─ echo_tool.py
+  │   │       └─ time_tool.py
+  │   └─ scripts/
+  │       └─ verify_1_3.sh
+  ├─ scripts/
+  │   ├─ bench_week4_2.sh
+  │   ├─ stream_ttft_bench.py
+  │   ├─ verify_week1.sh
+  │   ├─ verify_week2_1.sh
+  │   ├─ verify_week2_2.sh
+  │   ├─ verify_week2_3.sh
+  │   ├─ verify_week2_4.sh
+  │   ├─ verify_week2_5.sh
+  │   ├─ verify_week3_1.sh
+  │   ├─ verify_week3_2.sh
+  │   ├─ verify_week3_3.sh
+  │   ├─ verify_week3_5.sh
+  │   ├─ verify_week4_1.sh
+  │   ├─ verify_week4_2.sh
+  │   ├─ verify_week4_4.sh
+  │   └─ wrk_chat_non_stream.lua
   ├─ PRD.md
   ├─ TECH_DESIGN.md
+  ├─ RESEARCH.md
+  ├─ BENCHMARK_RESULTS.md
+  ├─ DEMO_SCRIPT.md
+  ├─ TIL.md
   ├─ AGENTS.md
   ├─ README.md
   └─ TODO.md
@@ -96,10 +177,10 @@ Cyrus-GW/
 - 接收 JSON 请求：
   - `message`（必填）
   - `stream`（可选，默认 `false`）
-  - `session_id`（可选）
+  - `session_id`（可选；`v1.0.0` 仅透传预留）
 - 参数校验
 - 限流判断（超限返回 `429`）
-- 进入调度队列
+- 进入当前网络 I/O 模式处理路径（`blocking` / `epoll` / `io_uring`）
 - 转发到 Agent Service
 - 回包给客户端（非流式或 SSE 流式）
 
@@ -140,9 +221,9 @@ Cyrus-GW/
 
 ### 4.6 简单 memory（P1，可选）
 
-- 基于 `session_id` 缓存最近 N 轮消息
-- 单进程内存存储，无持久化
-- 达到上限按 FIFO 淘汰
+- `session_id` 已纳入请求契约并透传到 Agent
+- `AGENT_MEMORY_MAX_TURNS` 配置项已预留
+- `v1.0.0` 尚未实现实际 memory 存储、回放与淘汰逻辑
 
 ---
 
@@ -203,7 +284,8 @@ Cyrus-GW/
   "request_id": "req_xxx",
   "answer": "现在是 21:30",
   "tool_used": "time_tool",
-  "model": "gpt-4o-mini"
+  "model": "gpt-4o-mini",
+  "retry_count": 0
 }
 ```
 
@@ -296,18 +378,15 @@ sudo dnf search cmake
    sudo dnf install -y cmake ninja-build
    ```
 
-2. **在订阅修好之前**：不必装 cmake，直接用下面 **§7.2** 中的 **`g++` 一条命令** 即可编出 `build/cyrus-gateway`（与本仓库 `CMakeLists.txt` 源列表一致）。
+2. **在订阅修好之前**：不必装 cmake，也可以直接用 `g++` 手工编译全部 `src/*.cpp`。
 
-若环境未安装 `cmake` / `ninja`，可在 `gateway-cpp` 目录下用 `g++` 直接链接（与仓库内 `CMakeLists.txt` 源文件列表一致）：
+若环境未安装 `cmake` / `ninja`，可在 `gateway-cpp` 目录下用 `g++` 直接编译全部源码：
 
 ```bash
 cd gateway-cpp
 mkdir -p build
-g++ -std=c++20 -Wall -Wextra -Wpedantic -O2 \
-  src/main.cpp src/common/config_loader.cpp src/common/logger.cpp \
-  src/net/http_server.cpp src/net/event_loop.cpp \
-  src/api/chat_handler.cpp src/scheduler/task_queue.cpp src/scheduler/worker_pool.cpp \
-  src/limiter/token_bucket.cpp src/upstream/agent_client.cpp \
+g++ -std=c++20 -Wall -Wextra -Wpedantic -O2 -fcoroutines -pthread \
+  $(find src -name '*.cpp' -print) \
   -Isrc -o build/cyrus-gateway
 ./build/cyrus-gateway
 ```
@@ -353,19 +432,19 @@ bash gateway-cpp/scripts/verify_1_4.sh
 成功（`POST /chat` 经转发返回 200）：
 
 ```json
-{"request_id":"req-e2e-1","latency_ms":69,"status_code":200,"tool_used":"","path":"/chat","stream":false}
+{"request_id":"req-e2e-1","latency_ms":69,"status_code":200,"tool_used":"","path":"/chat","stream":false,"retry_count":0}
 ```
 
 网关侧校验失败（`400`，参数非法）：
 
 ```json
-{"request_id":"req_xxxxxxxxxxxxxxxx","latency_ms":0,"status_code":400,"tool_used":"","path":"/chat","stream":false}
+{"request_id":"req_xxxxxxxxxxxxxxxx","latency_ms":0,"status_code":400,"tool_used":"","path":"/chat","stream":false,"retry_count":0,"error_layer":"gateway"}
 ```
 
 上游 Agent 不可用（`502`）：
 
 ```json
-{"request_id":"req-upstream-down","latency_ms":0,"status_code":502,"tool_used":"","path":"/chat","stream":false}
+{"request_id":"req-upstream-down","latency_ms":0,"status_code":502,"tool_used":"","path":"/chat","stream":false,"retry_count":0,"error_layer":"agent"}
 ```
 
 （`request_id` 与 `latency_ms` 以你本机运行为准；字段名固定。）
@@ -699,9 +778,12 @@ cat DEMO_SCRIPT.md
 - `agent_retry_max`
 - `rate_limit.capacity`
 - `rate_limit.refill_per_sec`
-- `queue.max_size`
 - `sse.first_chunk_timeout_ms`
 - `sse.total_timeout_ms`
+
+说明：
+
+- `queue.max_size` 目前只存在于 `gateway.yaml`，`v1.0.0` 尚未接入独立 scheduler 实现，也不会在运行时生效
 
 ### 8.2 Agent 配置（示意）
 
@@ -712,7 +794,7 @@ cat DEMO_SCRIPT.md
 - `LLM_MODEL`
 - `LLM_TIMEOUT_MS`
 - `AGENT_TOOL_ENABLE_LIST`
-- `AGENT_MEMORY_MAX_TURNS`
+- `AGENT_MEMORY_MAX_TURNS`（预留；`v1.0.0` 未消费）
 
 ### 8.3 环境变量示例
 
@@ -727,23 +809,27 @@ export LLM_TIMEOUT_MS="10000"
 
 ## 9. 日志与可观测性（最低要求）
 
-每条请求日志至少包含：
+`v1.0.0` 实际落地的请求日志字段：
 
 - `request_id`
 - `path`
 - `latency_ms`
-- `queue_wait_ms`
-- `llm_call_latency_ms`
 - `stream`
 - `tool_used`
 - `status_code`
-
-建议增强字段：
-
 - `retry_count`
+
+条件字段：
+
+- `ttft_ms`（仅流式成功路径）
+- `error_layer`（错误路径）
+
+已预留但 `v1.0.0` 未实际输出：
+
+- `queue_wait_ms`
+- `llm_call_latency_ms`
 - `client_ip`
 - `error_code`
-- `error_layer`（gateway / agent / llm）
 
 ---
 

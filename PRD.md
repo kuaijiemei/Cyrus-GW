@@ -36,7 +36,7 @@
 ### 2.2 最多增加 2 个增强功能
 
 - tool 调用（已纳入）
-- 简单 memory（可选，若时间允许）
+- 简单 memory（可选，若时间允许；未纳入 `v1.0.0`）
 
 ### 2.3 明确禁止（本期不做）
 
@@ -72,7 +72,7 @@
 - 若 Agent 判断需要工具能力，则流程为：
   - 用户 → C++ Gateway → Python Agent（tool）→ Python Agent（LLM）→ C++ Gateway → 用户
 - 对外仍统一表现为 `/chat` 一条主链路。
-- C++ Gateway 负责请求调度与异步处理，通过队列或协程调度实现高并发任务执行
+- C++ Gateway 负责请求接入、异步 I/O、限流、转发与回包；当前版本不引入独立请求队列
 
 ---
 
@@ -93,7 +93,7 @@
 
 ### 输出（建议）
 
-- 非流式：完整 answer + 基础元信息（latency、model）
+- 非流式：完整 answer + 基础元信息（`request_id`、`model`、`retry_count`）
 - 流式：`SSE` chunk 持续输出，结束后发送 done 事件
 
 ### 验收标准
@@ -181,9 +181,11 @@ Agent 决策基于规则 + LLM 输出（function calling 或 structured output�
 
 - 基于 `session_id` 在内存中保存最近 N 轮对话（如 5 轮）。
 - 仅做单进程内存存储，不做持久化，不做跨进程共享。
+- `v1.0.0` 只保留 `session_id` 契约与配置项，未实现实际 memory 读写。
 
 ### 验收标准
 
+- 若实现该增强项：
 - 同一 `session_id` 下第二次提问可引用前文信息
 - 达到上限时按 FIFO 淘汰旧消息
 
@@ -242,13 +244,17 @@ Agent 决策基于规则 + LLM 输出（function calling 或 structured output�
 
 - 最小日志字段为**必须实现**（P0）：
   - request_id
-  - 总耗时
+  - latency_ms
+  - path
   - status_code
-  - 是否流式
-  - 是否触发 tool
-  - LLM 调用耗时
-- 可额外增加：
+  - stream
+  - tool_used
   - retry_count
+- 条件字段：
+  - ttft_ms（仅流式成功路径）
+  - error_layer（错误路径）
+- 预留但本版未落地：
+  - llm_call_latency_ms
   - queue_wait_ms
 - 出错日志可定位在哪一层失败（网关/Agent/LLM）
 - Grafana/OTel 等可视化链路为可选项（非 P0）。
@@ -294,7 +300,7 @@ Agent 决策基于规则 + LLM 输出（function calling 或 structured output�
 - `Python Agent Service`
   - 任务编排
   - tool 决策与调用
-  - memory 读写（可选）
+  - memory 读写（可选；本版未落地）
   - LLM 调用封装与错误处理
 
 ---
@@ -317,7 +323,7 @@ Agent 决策基于规则 + LLM 输出（function calling 或 structured output�
 
 - 接入 tool 调用（至少 1 个可演示）
 - 完成 Agent 任务处理流程
-- 可选：实现简单 memory
+- 可选：实现简单 memory（未纳入 `v1.0.0` 交付）
 
 ### Week 4：打磨与展示
 
