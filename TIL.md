@@ -40,6 +40,17 @@
 
 ## 3) 问题清单（按时间倒序追加）
 
+### [2026-04-25] 模块：docs/readme-followup-sync
+
+- 现象：README 按招聘导向口径瘦身后，`DEMO_SCRIPT.md`、`TECH_DESIGN.md`、`BENCHMARK_RESULTS.md`、`PRD.md` 仍保留旧表述，例如“高性能网关”“Agent Runtime”“慢客户端背压”“全档位 P50/P99 均优于 epoll”。这会导致对外材料之间互相打架，也会把 README 刻意收掉的过度承诺重新带回来。
+- 根因：README 是最后一轮单独重构的，但演示稿、技术设计、benchmark 结论和 PRD 顶部定位没有一起收敛到同一套对外表述；尤其 benchmark 结论仍沿用了过度概括的旧话术。
+- 解决方案：同步更新 `DEMO_SCRIPT.md`、`TECH_DESIGN.md`、`BENCHMARK_RESULTS.md`、`PRD.md`：统一采用 README 的项目定位；删除未明确落地的“慢客户端背压”表述；把 benchmark 结论改为“C=500 吞吐优势明显、流式 TTFT 整体接近”，不再写“全档位 P50/P99 均优于 epoll”。
+- 防复发措施：以后只要 README 调整对外口径，就把 `README.md`、`DEMO_SCRIPT.md`、`TECH_DESIGN.md`、`BENCHMARK_RESULTS.md`、`PRD.md` 当作一组同时复查，至少跑一遍关键词检查：`高性能`、`Agent Runtime`、`背压`、`P50/P99`。
+- 验证方式：
+  - 正常路径：重新打开上述文档，项目定位、SSE 能力表述、benchmark 结论与 README 一致，不再出现“README 收掉了、其他文档还在写”的情况。
+  - 异常路径：如果后续又把“全档位 P50/P99 均优于 epoll”之类口径写回去，应该能通过关键词检查立刻发现。
+- 关联文件：`README.md`、`DEMO_SCRIPT.md`、`TECH_DESIGN.md`、`BENCHMARK_RESULTS.md`、`PRD.md`
+
 ### [2026-04-18] 模块：release-doc-sync（v1.0.0 发布前）
 
 - 现象：准备发布 `v1.0.0` 时，根文档之间出现多处“说明比实现更超前”的漂移：`README.md` / `TECH_DESIGN.md` 仍把独立调度队列、`queue_wait_ms`、`llm_call_latency_ms` 当作已落地能力；目录树遗漏实际源码文件；`DEMO_SCRIPT.md` 中个别口播把 `latency_ms` 说成响应字段、把 `time_tool` 路径说成“两次 LLM 调用”、把 tool 失败说成 `error_layer=tool`；构建回退命令也没有覆盖全部 `.cpp`。

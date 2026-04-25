@@ -44,9 +44,9 @@ flowchart TD
 
 **一句话定位**（背熟）：
 
-> 面向 LLM 场景构建高性能网关：基于 C++20 无栈协程与 io_uring 实现请求接入、
-> 异步调度、SSE 透传与限流控制；通过 Python Agent 完成任务决策与 Tool 调用闭环，
-> 并以同机基准测试验证并发模型性能差异。
+> 一个面向 LLM 流式接入场景的 C++20 AI Gateway：基于 io_uring + 协程实现异步 I/O 调度，
+> 并提供 epoll Reactor 对照基线、SSE 透传、Token Bucket 限流、request_id 链路日志与
+> wrk 压测分析。
 
 ---
 
@@ -123,7 +123,7 @@ sequenceDiagram
     A-->>G: SSE done
     G-->>C: event:done
 
-    Note over C,G: TTFT = 首个 delta.timestamp − request.timestamp<br/>慢客户端背压：下游阻塞时暂停上游读取
+    Note over C,G: TTFT = 首个 delta.timestamp − request.timestamp<br/>首包前失败返回 HTTP 504，首包后错误通过 event:error 表达
 ```
 
 ---
@@ -138,7 +138,7 @@ sequenceDiagram
 
 > 这个项目叫 Cyrus-GW，核心是一个 C++20 + io_uring 驱动的 AI 网关，
 > 搭配 Python Agent 做任务决策和 Tool 调用。
-> 架构是两个服务：C++ 网关负责高并发接入、限流、SSE 透传；
+> 架构是两个服务：C++ 网关负责接入、限流、转发和 SSE 透传；
 > Python Agent 负责 LLM 调用和工具编排。
 > 下面我用 curl 演示几个核心路径。
 
@@ -260,7 +260,7 @@ wait
 
 > A：遵循"网关只做接入"原则。AI 逻辑迭代快（prompt 工程、tool 扩展），
 > 放在 Python 里可以做到"改 prompt 重启即生效"；放 C++ 里每次改都要重编译。
-> Gateway 的价值是稳定的高并发接入层，不应被 AI 逻辑频繁变更拖累。
+> Gateway 的价值是稳定的接入与转发层，不应被 AI 逻辑频繁变更拖累。
 
 ### 4.2 并发模型与性能
 
@@ -272,7 +272,7 @@ wait
 > 3）批量提交：SQE/CQE 机制摊薄 syscall 开销
 > 4）数据支撑：C=500 时 io_uring 吞吐是 epoll 的 2.15 倍
 > 5）连接管理：协程栈 KB 级，适合万级并发连接
-> 6）延迟一致性：全档位 P50/P99 均优于 epoll
+> 6）数据口径：非流式高并发吞吐优势最明确，流式 TTFT 两者整体接近
 
 **Q：压测瓶颈在 Agent 为什么还能看出 Gateway 差异？**
 
@@ -304,11 +304,11 @@ wait
 > 有首包超时（sse.first_chunk_timeout_ms）和总超时控制，
 > 超时后向客户端发送 event:error 并断开连接。
 
-**Q：慢客户端怎么处理？**
+**Q：流式错误怎么处理？**
 
-> A：Gateway 侧有写超时控制。如果客户端接收速度过慢导致 socket 缓冲区满，
-> write 会在超时后返回错误，Gateway 主动关闭该连接。
-> 不会因为一个慢客户端阻塞其他请求的处理。
+> A：如果首个 chunk 在超时窗口内没到，Gateway 直接返回 HTTP 504。
+> 如果流已经开始再发生超时或上游异常，就不再改 HTTP 状态码，
+> 而是通过 `event:error` 向客户端表达错误并结束连接。
 
 ### 4.4 Agent 与 Tool
 

@@ -4,17 +4,18 @@
 
 ### 项目名称
 
-`Cyrus-GW：C++20/io_uring 驱动的高并发 AI Gateway 与 Agent Runtime`
+`Cyrus-GW：C++20 AI Gateway 与 Python Agent 双服务 MVP`
 
 ### 一句话定位（必须背）
 
-面向 LLM 场景构建高性能网关：基于 C++20 无栈协程与 io_uring 实现请求接入、异步调度、SSE 透传与限流控制；通过 Python Agent 完成任务决策与 Tool 调用闭环，并以同机基准测试验证并发模型性能差异。
+一个面向 LLM 流式接入场景的 C++20 AI Gateway：基于 io_uring + 协程实现异步 I/O 调度，并提供 epoll Reactor 对照基线、SSE 透传、Token Bucket 限流、request_id 链路日志与 wrk 压测分析。
 
 ### 本质（最重要）
 
 本项目是：
 
-- 高性能网关（C++） + AI 执行系统（Python）
+- C++ Gateway（接入 / 限流 / 转发 / SSE）
+- Python Agent（决策 / LLM 调用 / Tool 路由）
 
 不是：
 
@@ -355,7 +356,7 @@ Cyrus-GW/
 
 - Gateway 不缓存全量结果，按 chunk 透传
 - 控制首包超时与总超时
-- 慢客户端触发背压，防止内存膨胀
+- 首包前失败返回 HTTP 504，首包后通过 `event:error` 表达错误
 
 ## 7.8 并发模型对比压测（面试关键）
 
