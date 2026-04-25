@@ -1,8 +1,6 @@
 # Cyrus-GW
 
-`Cyrus-GW：C++20/io_uring 驱动的高并发 AI Gateway 与 Agent Runtime`
-
-面向 LLM 场景构建高性能网关：基于 C++20 无栈协程与 `io_uring` 实现请求接入、异步调度、SSE 透传与限流控制；通过 Python Agent 完成任务决策与 Tool 调用闭环，并以同机基准测试验证并发模型性能差异。
+一个面向 LLM 流式接入场景的 C++20 AI Gateway：基于 io_uring + 协程实现异步 I/O 调度，并提供 epoll Reactor 对照基线、SSE 透传、Token Bucket 限流、request_id 链路日志与 wrk 压测分析。
 
 ---
 
